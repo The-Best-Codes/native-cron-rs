@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Cross-platform OS-level cron scheduling for Rust.
 //!
 //! No daemon, timers, or resident process: `native-cron` registers commands
