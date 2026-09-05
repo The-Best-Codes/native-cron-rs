@@ -1,0 +1,21 @@
+[package]
+name = "native-cron"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Cross-platform OS-level cron scheduling for Rust. No daemon, timers, or resident process."
+license = "MIT"
+repository = "https://github.com/The-Best-Codes/native-cron-rs"
+readme = "README.md"
+keywords = ["cron", "launchd", "systemd", "scheduler", "task-scheduler"]
+categories = ["os", "date-and-time"]
+
+[dependencies]
+thiserror = "2"
+which = "8"
+plist = "1.10"
+quick-xml = "0.42"
+systemd-unit-edit = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
