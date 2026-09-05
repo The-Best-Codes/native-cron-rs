@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use systemd_unit_edit::SystemdUnit;
+use systemd_unit_edit::{Section, SystemdUnit};
 
 use crate::driver::Driver;
 use crate::error::{Error, Result};
@@ -13,6 +13,11 @@ use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+fn section(unit: &SystemdUnit, name: &str) -> Result<Section> {
+    unit.get_section(name)
+        .ok_or_else(|| Error::SystemdUnit(format!("missing [{name}] section after add_section")))
+}
 
 /// Context shared by the systemd driver; primarily overridable for tests.
 pub struct LinuxContext {
@@ -71,13 +76,13 @@ pub fn render_service(job: &NormalizedJob) -> Result<String> {
         SystemdUnit::from_str("").map_err(|error| Error::SystemdUnit(error.to_string()))?;
     unit.add_section("Unit");
     {
-        let mut section = unit.get_section("Unit").expect("just added");
+        let mut section = section(&unit, "Unit")?;
         section.set("Description", &format!("native-cron job: {}", job.id));
     }
 
     unit.add_section("Service");
     {
-        let mut section = unit.get_section("Service").expect("just added");
+        let mut section = section(&unit, "Service")?;
         section.set("Type", "oneshot");
         if let Some(cwd) = &job.cwd {
             section.set("WorkingDirectory", &systemd_quote(&cwd.to_string_lossy()));
@@ -111,7 +116,7 @@ pub fn render_service(job: &NormalizedJob) -> Result<String> {
 
     if matches!(job.schedule, Schedule::Startup) {
         unit.add_section("Install");
-        let mut section = unit.get_section("Install").expect("just added");
+        let mut section = section(&unit, "Install")?;
         section.set("WantedBy", "default.target");
     }
 
@@ -124,13 +129,13 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
         SystemdUnit::from_str("").map_err(|error| Error::SystemdUnit(error.to_string()))?;
     unit.add_section("Unit");
     {
-        let mut section = unit.get_section("Unit").expect("just added");
+        let mut section = section(&unit, "Unit")?;
         section.set("Description", &format!("native-cron schedule: {}", job.id));
     }
 
     unit.add_section("Timer");
     {
-        let mut section = unit.get_section("Timer").expect("just added");
+        let mut section = section(&unit, "Timer")?;
         for line in calendar_lines(calendar) {
             section.add("OnCalendar", &line);
         }
@@ -141,7 +146,7 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
 
     unit.add_section("Install");
     {
-        let mut section = unit.get_section("Install").expect("just added");
+        let mut section = section(&unit, "Install")?;
         section.set("WantedBy", "timers.target");
     }
 

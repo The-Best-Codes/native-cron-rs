@@ -5,14 +5,18 @@ use crate::error::{Error, Result};
 /// The result of running a native command.
 #[derive(Debug, Clone)]
 pub struct ProcessOutput {
+    /// Process exit code, or `1` if the process was terminated by a signal.
     pub code: i32,
+    /// Captured standard output, decoded as UTF-8 or UTF-16.
     pub stdout: String,
+    /// Captured standard error, decoded as UTF-8 or UTF-16.
     pub stderr: String,
 }
 
 /// Abstraction over running native commands, so drivers can be tested without
 /// touching the real operating system.
 pub trait CommandRunner: Send + Sync {
+    /// Runs `command` with `args` and returns its output.
     fn run(&self, command: &str, args: &[&str]) -> Result<ProcessOutput>;
 }
 
@@ -65,8 +69,10 @@ pub fn decode_process_output(buffer: &[u8]) -> String {
 
 fn decode_utf16le(buffer: &[u8]) -> String {
     let units: Vec<u16> = buffer
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     String::from_utf16_lossy(&units)
 }

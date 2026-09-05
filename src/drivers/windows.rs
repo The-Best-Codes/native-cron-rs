@@ -66,7 +66,7 @@ fn evenly_spaced(values: &[u32], period: u32) -> Option<u32> {
         return Some(period);
     }
     let step = values[1].checked_sub(values[0])?;
-    if step == 0 || period % step != 0 || values.len() as u32 != period / step {
+    if step == 0 || !period.is_multiple_of(step) || values.len() as u32 != period / step {
         return None;
     }
     for (index, value) in values.iter().enumerate() {

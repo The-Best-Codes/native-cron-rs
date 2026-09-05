@@ -4,8 +4,11 @@ use std::path::PathBuf;
 /// The operating system a driver targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
+    /// macOS (launchd).
     Darwin,
+    /// Linux (systemd user timers).
     Linux,
+    /// Windows (Task Scheduler).
     Windows,
 }
 
@@ -133,8 +136,11 @@ impl CronOptions {
 /// configuration it was registered with (when known).
 #[derive(Debug, Clone)]
 pub struct JobStatus {
+    /// The job id.
     pub id: String,
+    /// The backend that owns this job.
     pub platform: Platform,
+    /// Whether the job is enabled, disabled, or missing.
     pub state: JobState,
     /// Paths to the native configuration files backing this job.
     pub config_paths: Vec<PathBuf>,
@@ -144,8 +150,12 @@ pub struct JobStatus {
     pub run_at_startup: bool,
     /// The resolved command, if this handle knows its configuration.
     pub command: Option<Vec<String>>,
+    /// Working directory, if this handle knows its configuration.
     pub cwd: Option<PathBuf>,
+    /// Extra environment variables, if this handle knows its configuration.
     pub env: Option<HashMap<String, String>>,
+    /// Standard output path, if this handle knows its configuration.
     pub stdout: Option<PathBuf>,
+    /// Standard error path, if this handle knows its configuration.
     pub stderr: Option<PathBuf>,
 }

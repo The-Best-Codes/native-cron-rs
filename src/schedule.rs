@@ -68,18 +68,26 @@ pub struct CronField {
 /// A parsed calendar cron expression: `minute hour day-of-month month day-of-week`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarSchedule {
+    /// Minute field (`0`–`59`).
     pub minute: CronField,
+    /// Hour field (`0`–`23`).
     pub hour: CronField,
+    /// Day-of-month field (`1`–`31`).
     pub day_of_month: CronField,
+    /// Month field (`1`–`12`).
     pub month: CronField,
+    /// Day-of-week field (`0`–`6`, Sunday = `0`).
     pub day_of_week: CronField,
+    /// Canonical five-field expression for this schedule.
     pub normalized: String,
 }
 
 /// A parsed cron expression: either a calendar schedule or the `@reboot` startup alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Schedule {
+    /// A five-field calendar expression.
     Calendar(CalendarSchedule),
+    /// Run at user-session start (`@reboot` / `@login`).
     Startup,
 }
 
