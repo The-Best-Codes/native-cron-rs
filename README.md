@@ -12,7 +12,10 @@ Cross-platform OS-level cron for Rust.
 This crate is deliberately not an in-process scheduler. If you want callbacks inside a long-lived server, use a tokio interval task or similar. If you want a command to run at 2am whether or not your program is running, use this.
 
 > Heads up! Some portions of this project are AI-generated.
-> This project is inspired by https://github.com/bndnsmth/native-cron.
+> Inspired by https://github.com/bndnsmth/native-cron.
+
+> [!NOTE]
+> This project is developed and maintained by [AgentOne](https://github.com/The-Best-Codes/agent-one). We use it for scheduling AI agent tasks in the AgentOne desktop app, so we open-sourced it for everyone!
 
 ## Installation
 
