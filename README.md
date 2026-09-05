@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/native-cron)](https://crates.io/crates/native-cron)
 [![docs.rs](https://img.shields.io/docsrs/native-cron)](https://docs.rs/native-cron)
 [![license](https://img.shields.io/crates/l/native-cron)](LICENSE)
-[![rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org)
+[![rust](https://img.shields.io/badge/rust-1.98%2B-orange)](https://www.rust-lang.org)
 
 Cross-platform OS-level cron for Rust.
 
