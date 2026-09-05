@@ -12,6 +12,7 @@ Cross-platform OS-level cron for Rust.
 This crate is deliberately not an in-process scheduler. If you want callbacks inside a long-lived server, use a tokio interval task or similar. If you want a command to run at 2am whether or not your program is running, use this.
 
 > Heads up! Some portions of this project are AI-generated.
+> This project is inspired by https://github.com/bndnsmth/native-cron.
 
 ## Installation
 
