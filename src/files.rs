@@ -20,7 +20,9 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let unique = std::process::id().to_string() + "-" + &unique_suffix();
     let temp_path = directory.join(format!(
         "{}.{unique}.tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("native-cron")
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("native-cron")
     ));
 
     fs::write(&temp_path, contents)?;

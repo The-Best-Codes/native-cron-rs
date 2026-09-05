@@ -72,7 +72,11 @@ fn decode_utf16le(buffer: &[u8]) -> String {
 }
 
 /// Runs a command and returns an error if it exits with a non-zero status.
-pub fn run_checked(runner: &dyn CommandRunner, command: &str, args: &[&str]) -> Result<ProcessOutput> {
+pub fn run_checked(
+    runner: &dyn CommandRunner,
+    command: &str,
+    args: &[&str],
+) -> Result<ProcessOutput> {
     let output = runner.run(command, args)?;
     if output.code != 0 {
         let detail = if !output.stderr.trim().is_empty() {
@@ -99,13 +103,20 @@ mod tests {
         assert_eq!(decode_process_output("hello".as_bytes()), "hello");
 
         let mut with_bom = vec![0xff, 0xfe];
-        with_bom.extend("<Enabled>false</Enabled>".encode_utf16().flat_map(u16::to_le_bytes));
+        with_bom.extend(
+            "<Enabled>false</Enabled>"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
         assert_eq!(decode_process_output(&with_bom), "<Enabled>false</Enabled>");
 
         let without_bom: Vec<u8> = "<Enabled>false</Enabled>"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect();
-        assert_eq!(decode_process_output(&without_bom), "<Enabled>false</Enabled>");
+        assert_eq!(
+            decode_process_output(&without_bom),
+            "<Enabled>false</Enabled>"
+        );
     }
 }

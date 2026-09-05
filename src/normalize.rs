@@ -162,7 +162,8 @@ fn resolve_executable(executable: &str, base: &Path) -> Result<PathBuf> {
 }
 
 fn validate_executable(path: &Path) -> Result<PathBuf> {
-    let metadata = std::fs::metadata(path).map_err(|_| Error::MissingExecutable(path.to_path_buf()))?;
+    let metadata =
+        std::fs::metadata(path).map_err(|_| Error::MissingExecutable(path.to_path_buf()))?;
     if !metadata.is_file() {
         return Err(Error::MissingExecutable(path.to_path_buf()));
     }
@@ -181,7 +182,14 @@ mod tests {
     use super::*;
 
     fn valid_options(id: &str) -> CronOptions {
-        CronOptions::new(id, "@daily", [std::env::current_exe().unwrap().to_string_lossy().into_owned()])
+        CronOptions::new(
+            id,
+            "@daily",
+            [std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()],
+        )
     }
 
     #[test]
@@ -195,7 +203,10 @@ mod tests {
     fn rejects_malformed_schedules() {
         let mut options = valid_options("bad-schedule");
         options.cron = Some("* * *".to_string());
-        assert!(matches!(normalize(options), Err(Error::InvalidCronExpression(_))));
+        assert!(matches!(
+            normalize(options),
+            Err(Error::InvalidCronExpression(_))
+        ));
     }
 
     #[test]

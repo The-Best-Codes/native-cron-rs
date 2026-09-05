@@ -28,13 +28,20 @@ fn list(values: &[u32], wildcard: bool) -> String {
     if wildcard {
         "*".to_string()
     } else {
-        values.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+        values
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
 fn calendar_lines(schedule: &CalendarSchedule) -> Vec<String> {
     let month = list(&schedule.month.values, schedule.month.wildcard);
-    let day = list(&schedule.day_of_month.values, schedule.day_of_month.wildcard);
+    let day = list(
+        &schedule.day_of_month.values,
+        schedule.day_of_month.wildcard,
+    );
     let hour = list(&schedule.hour.values, schedule.hour.wildcard);
     let minute = list(&schedule.minute.values, schedule.minute.wildcard);
     let time = format!("{hour}:{minute}:00");
@@ -60,7 +67,8 @@ fn calendar_lines(schedule: &CalendarSchedule) -> Vec<String> {
 
 /// Renders the `.service` unit for `job`.
 pub fn render_service(job: &NormalizedJob) -> Result<String> {
-    let mut unit = SystemdUnit::from_str("").map_err(|error| Error::SystemdUnit(error.to_string()))?;
+    let mut unit =
+        SystemdUnit::from_str("").map_err(|error| Error::SystemdUnit(error.to_string()))?;
     unit.add_section("Unit");
     {
         let mut section = unit.get_section("Unit").expect("just added");
@@ -112,7 +120,8 @@ pub fn render_service(job: &NormalizedJob) -> Result<String> {
 
 /// Renders the `.timer` unit for `job`. Only meaningful for calendar schedules.
 pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<String> {
-    let mut unit = SystemdUnit::from_str("").map_err(|error| Error::SystemdUnit(error.to_string()))?;
+    let mut unit =
+        SystemdUnit::from_str("").map_err(|error| Error::SystemdUnit(error.to_string()))?;
     unit.add_section("Unit");
     {
         let mut section = unit.get_section("Unit").expect("just added");
@@ -223,8 +232,16 @@ impl Driver for LinuxDriver {
             }
         };
 
-        run_checked(self.context.runner.as_ref(), "systemctl", &["--user", "daemon-reload"])?;
-        run_checked(self.context.runner.as_ref(), "systemctl", &["--user", "enable", &unit])?;
+        run_checked(
+            self.context.runner.as_ref(),
+            "systemctl",
+            &["--user", "daemon-reload"],
+        )?;
+        run_checked(
+            self.context.runner.as_ref(),
+            "systemctl",
+            &["--user", "enable", &unit],
+        )?;
         match &job.schedule {
             Schedule::Startup => {
                 run_checked(
@@ -234,7 +251,11 @@ impl Driver for LinuxDriver {
                 )?;
             }
             Schedule::Calendar(_) => {
-                run_checked(self.context.runner.as_ref(), "systemctl", &["--user", "restart", &unit])?;
+                run_checked(
+                    self.context.runner.as_ref(),
+                    "systemctl",
+                    &["--user", "restart", &unit],
+                )?;
             }
         }
         Ok(())
@@ -245,7 +266,11 @@ impl Driver for LinuxDriver {
             .installed_unit(id)
             .ok_or_else(|| Error::NotRegistered(id.to_string()))?;
         if unit.ends_with(".service") {
-            run_checked(self.context.runner.as_ref(), "systemctl", &["--user", "enable", &unit])?;
+            run_checked(
+                self.context.runner.as_ref(),
+                "systemctl",
+                &["--user", "enable", &unit],
+            )?;
             run_checked(
                 self.context.runner.as_ref(),
                 "systemctl",
@@ -276,7 +301,11 @@ impl Driver for LinuxDriver {
                 std::fs::remove_file(&path)?;
             }
         }
-        run_checked(self.context.runner.as_ref(), "systemctl", &["--user", "daemon-reload"])?;
+        run_checked(
+            self.context.runner.as_ref(),
+            "systemctl",
+            &["--user", "daemon-reload"],
+        )?;
         Ok(())
     }
 
@@ -359,7 +388,8 @@ mod tests {
     #[test]
     fn renders_startup_schedules_as_enabled_services_without_timers() {
         let dir = tempfile::tempdir().unwrap();
-        let job = normalize(CronOptions::at_startup("login", ["/bin/echo"]).cwd(dir.path())).unwrap();
+        let job =
+            normalize(CronOptions::at_startup("login", ["/bin/echo"]).cwd(dir.path())).unwrap();
         let service = render_service(&job).unwrap();
         assert!(service.contains("RemainAfterExit=yes"));
         assert!(service.contains("WantedBy=default.target"));
@@ -399,15 +429,25 @@ mod tests {
         driver.register(&job).unwrap();
         let status = driver.status("daily-sync").unwrap();
         assert_eq!(status.state, JobState::Active);
-        assert!(std::fs::read_to_string(&status.config_paths[0]).unwrap().contains("Type=oneshot"));
-        assert!(std::fs::read_to_string(&status.config_paths[1]).unwrap().contains("OnCalendar="));
+        assert!(std::fs::read_to_string(&status.config_paths[0])
+            .unwrap()
+            .contains("Type=oneshot"));
+        assert!(std::fs::read_to_string(&status.config_paths[1])
+            .unwrap()
+            .contains("OnCalendar="));
 
         driver.disable("daily-sync").unwrap();
-        assert_eq!(driver.status("daily-sync").unwrap().state, JobState::Inactive);
+        assert_eq!(
+            driver.status("daily-sync").unwrap().state,
+            JobState::Inactive
+        );
         driver.enable("daily-sync").unwrap();
         driver.remove("daily-sync").unwrap();
         driver.remove("daily-sync").unwrap();
-        assert_eq!(driver.status("daily-sync").unwrap().state, JobState::Missing);
+        assert_eq!(
+            driver.status("daily-sync").unwrap().state,
+            JobState::Missing
+        );
     }
 
     #[test]

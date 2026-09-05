@@ -52,7 +52,11 @@ impl CalendarEntry {
     }
 }
 
-fn cartesian(entries: Vec<CalendarEntry>, key: Option<&[u32]>, apply: impl Fn(&mut CalendarEntry, u32) + Copy) -> Vec<CalendarEntry> {
+fn cartesian(
+    entries: Vec<CalendarEntry>,
+    key: Option<&[u32]>,
+    apply: impl Fn(&mut CalendarEntry, u32) + Copy,
+) -> Vec<CalendarEntry> {
     match key {
         None => entries,
         Some(values) => entries
@@ -83,24 +87,54 @@ fn calendar_entries(schedule: &CalendarSchedule) -> Vec<CalendarEntry> {
         weekday: None,
     }];
 
-    let minute_values = if schedule.minute.wildcard { None } else { Some(schedule.minute.values.as_slice()) };
-    let hour_values = if schedule.hour.wildcard { None } else { Some(schedule.hour.values.as_slice()) };
-    let month_values = if schedule.month.wildcard { None } else { Some(schedule.month.values.as_slice()) };
-    let day_values = if schedule.day_of_month.wildcard { None } else { Some(schedule.day_of_month.values.as_slice()) };
-    let weekday_values = if schedule.day_of_week.wildcard { None } else { Some(schedule.day_of_week.values.as_slice()) };
+    let minute_values = if schedule.minute.wildcard {
+        None
+    } else {
+        Some(schedule.minute.values.as_slice())
+    };
+    let hour_values = if schedule.hour.wildcard {
+        None
+    } else {
+        Some(schedule.hour.values.as_slice())
+    };
+    let month_values = if schedule.month.wildcard {
+        None
+    } else {
+        Some(schedule.month.values.as_slice())
+    };
+    let day_values = if schedule.day_of_month.wildcard {
+        None
+    } else {
+        Some(schedule.day_of_month.values.as_slice())
+    };
+    let weekday_values = if schedule.day_of_week.wildcard {
+        None
+    } else {
+        Some(schedule.day_of_week.values.as_slice())
+    };
 
-    let common = cartesian(seed, minute_values, |entry, value| entry.minute = Some(value));
+    let common = cartesian(seed, minute_values, |entry, value| {
+        entry.minute = Some(value)
+    });
     let common = cartesian(common, hour_values, |entry, value| entry.hour = Some(value));
-    let common = cartesian(common, month_values, |entry, value| entry.month = Some(value));
+    let common = cartesian(common, month_values, |entry, value| {
+        entry.month = Some(value)
+    });
 
     if day_values.is_some() && weekday_values.is_some() {
-        let mut day_branch = cartesian(common.clone(), day_values, |entry, value| entry.day = Some(value));
-        let weekday_branch = cartesian(common, weekday_values, |entry, value| entry.weekday = Some(value));
+        let mut day_branch = cartesian(common.clone(), day_values, |entry, value| {
+            entry.day = Some(value)
+        });
+        let weekday_branch = cartesian(common, weekday_values, |entry, value| {
+            entry.weekday = Some(value)
+        });
         day_branch.extend(weekday_branch);
         day_branch
     } else {
         let with_day = cartesian(common, day_values, |entry, value| entry.day = Some(value));
-        cartesian(with_day, weekday_values, |entry, value| entry.weekday = Some(value))
+        cartesian(with_day, weekday_values, |entry, value| {
+            entry.weekday = Some(value)
+        })
     }
 }
 
@@ -110,7 +144,11 @@ pub fn render_plist(job: &NormalizedJob) -> Result<Vec<u8>> {
     let mut root = Dictionary::new();
     root.insert("Label".to_string(), Value::String(label));
 
-    let arguments: Vec<Value> = job.command.iter().map(|arg| Value::String(arg.clone())).collect();
+    let arguments: Vec<Value> = job
+        .command
+        .iter()
+        .map(|arg| Value::String(arg.clone()))
+        .collect();
     root.insert("ProgramArguments".to_string(), Value::Array(arguments));
 
     if let Some(cwd) = &job.cwd {
@@ -125,7 +163,10 @@ pub fn render_plist(job: &NormalizedJob) -> Result<Vec<u8>> {
         for (key, value) in &job.env {
             env_dict.insert(key.clone(), Value::String(value.clone()));
         }
-        root.insert("EnvironmentVariables".to_string(), Value::Dictionary(env_dict));
+        root.insert(
+            "EnvironmentVariables".to_string(),
+            Value::Dictionary(env_dict),
+        );
     }
 
     match &job.schedule {
@@ -186,7 +227,10 @@ impl DarwinDriver {
 
     fn bootout(&self, id: &str) -> Result<()> {
         let service = self.service(id);
-        let result = self.context.runner.run("launchctl", &["bootout", &service])?;
+        let result = self
+            .context
+            .runner
+            .run("launchctl", &["bootout", &service])?;
         if result.code != 0 && result.code != 3 && result.code != 113 {
             return Err(Error::CommandFailed {
                 command: format!("launchctl bootout {service}"),
@@ -325,7 +369,8 @@ mod tests {
     #[test]
     fn renders_startup_schedules_as_launchd_run_at_load_jobs() {
         let dir = tempfile::tempdir().unwrap();
-        let job = normalize(CronOptions::at_startup("login-task", ["/bin/echo"]).cwd(dir.path())).unwrap();
+        let job = normalize(CronOptions::at_startup("login-task", ["/bin/echo"]).cwd(dir.path()))
+            .unwrap();
         let xml = String::from_utf8(render_plist(&job).unwrap()).unwrap();
         assert!(xml.contains("<key>RunAtLoad</key>"));
         assert!(!xml.contains("StartCalendarInterval"));

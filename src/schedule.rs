@@ -153,7 +153,13 @@ fn format_field(field: &CronField) -> String {
     }
 }
 
-fn parse_number(value: &str, label: &str, min: u32, max: u32, names: Option<&[(&str, u32)]>) -> Result<u32> {
+fn parse_number(
+    value: &str,
+    label: &str,
+    min: u32,
+    max: u32,
+    names: Option<&[(&str, u32)]>,
+) -> Result<u32> {
     let named = names.and_then(|names| {
         let lower = value.to_ascii_lowercase();
         names
@@ -236,9 +242,9 @@ fn parse_field(
         }
         let step: u32 = match step_source {
             None => 1,
-            Some(step_str) => step_str
-                .parse()
-                .map_err(|_| Error::InvalidCronExpression(format!("{label} step must be a positive integer")))?,
+            Some(step_str) => step_str.parse().map_err(|_| {
+                Error::InvalidCronExpression(format!("{label} step must be a positive integer"))
+            })?,
         };
         if step == 0 {
             return Err(Error::InvalidCronExpression(format!(
@@ -306,9 +312,14 @@ mod tests {
 
     #[test]
     fn supports_nicknames_full_names_lists_ranges_and_sunday_aliases() {
-        assert_eq!(Schedule::parse("@annually").unwrap().normalized(), "0 0 1 1 *");
         assert_eq!(
-            Schedule::parse("0 2 * January Sunday,7").unwrap().normalized(),
+            Schedule::parse("@annually").unwrap().normalized(),
+            "0 0 1 1 *"
+        );
+        assert_eq!(
+            Schedule::parse("0 2 * January Sunday,7")
+                .unwrap()
+                .normalized(),
             "0 2 * 1 0"
         );
         assert_eq!(

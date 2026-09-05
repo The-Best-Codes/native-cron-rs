@@ -13,11 +13,28 @@ use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
 
 const MONTHS: [&str; 13] = [
-    "", "January", "February", "March", "April", "May", "June", "July", "August", "September",
-    "October", "November", "December",
+    "",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 const WEEKDAYS: [&str; 7] = [
-    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
 ];
 
 /// Context shared by the Task Scheduler driver; primarily overridable for tests.
@@ -84,10 +101,16 @@ pub fn render_powershell_wrapper(job: &NormalizedJob) -> String {
         .join(" ");
     script.push_str(&format!("& {command}"));
     if let Some(stdout) = &job.stdout {
-        script.push_str(&format!(" 1>> {}", powershell_quote(&stdout.to_string_lossy())));
+        script.push_str(&format!(
+            " 1>> {}",
+            powershell_quote(&stdout.to_string_lossy())
+        ));
     }
     if let Some(stderr) = &job.stderr {
-        script.push_str(&format!(" 2>> {}", powershell_quote(&stderr.to_string_lossy())));
+        script.push_str(&format!(
+            " 2>> {}",
+            powershell_quote(&stderr.to_string_lossy())
+        ));
     }
     script.push_str(
         "\n$nativeCronExitCode = $LASTEXITCODE\nif ($null -eq $nativeCronExitCode) { $nativeCronExitCode = 0 }\nexit $nativeCronExitCode\n",
@@ -101,32 +124,49 @@ fn render_calendar_trigger(
     schedule_xml: impl FnOnce(&mut Writer<Vec<u8>>) -> Result<()>,
     repetition: Option<&str>,
 ) -> Result<()> {
-    writer.write_event(Event::Start(quick_xml::events::BytesStart::new("CalendarTrigger")))?;
+    writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+        "CalendarTrigger",
+    )))?;
     writer
         .create_element("StartBoundary")
         .write_text_content(BytesText::new(boundary))?;
     if let Some(interval) = repetition {
-        writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Repetition")))?;
+        writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "Repetition",
+        )))?;
         writer
             .create_element("Interval")
             .write_text_content(BytesText::new(interval))?;
         writer.write_event(Event::End(quick_xml::events::BytesEnd::new("Repetition")))?;
     }
     schedule_xml(writer)?;
-    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("CalendarTrigger")))?;
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        "CalendarTrigger",
+    )))?;
     Ok(())
 }
 
-fn write_values_xml(writer: &mut Writer<Vec<u8>>, wrapper: &str, element: &str, values: &[String]) -> Result<()> {
+fn write_values_xml(
+    writer: &mut Writer<Vec<u8>>,
+    wrapper: &str,
+    element: &str,
+    values: &[String],
+) -> Result<()> {
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new(wrapper)))?;
     for value in values {
-        writer.create_element(element).write_text_content(BytesText::new(value))?;
+        writer
+            .create_element(element)
+            .write_text_content(BytesText::new(value))?;
     }
     writer.write_event(Event::End(quick_xml::events::BytesEnd::new(wrapper)))?;
     Ok(())
 }
 
-fn write_named_values_xml(writer: &mut Writer<Vec<u8>>, wrapper: &str, values: &[&str]) -> Result<()> {
+fn write_named_values_xml(
+    writer: &mut Writer<Vec<u8>>,
+    wrapper: &str,
+    values: &[&str],
+) -> Result<()> {
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new(wrapper)))?;
     for value in values {
         writer.create_element(*value).write_empty()?;
@@ -136,12 +176,26 @@ fn write_named_values_xml(writer: &mut Writer<Vec<u8>>, wrapper: &str, values: &
 }
 
 fn monthly_schedule(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) -> Result<()> {
-    writer.write_event(Event::Start(quick_xml::events::BytesStart::new("ScheduleByMonth")))?;
-    let days: Vec<String> = schedule.day_of_month.values.iter().map(u32::to_string).collect();
+    writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+        "ScheduleByMonth",
+    )))?;
+    let days: Vec<String> = schedule
+        .day_of_month
+        .values
+        .iter()
+        .map(u32::to_string)
+        .collect();
     write_values_xml(writer, "DaysOfMonth", "Day", &days)?;
-    let months: Vec<&str> = schedule.month.values.iter().map(|value| MONTHS[*value as usize]).collect();
+    let months: Vec<&str> = schedule
+        .month
+        .values
+        .iter()
+        .map(|value| MONTHS[*value as usize])
+        .collect();
     write_named_values_xml(writer, "Months", &months)?;
-    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("ScheduleByMonth")))?;
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        "ScheduleByMonth",
+    )))?;
     Ok(())
 }
 
@@ -154,19 +208,32 @@ fn weekday_schedule(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) -
         .collect();
 
     if schedule.month.wildcard {
-        writer.write_event(Event::Start(quick_xml::events::BytesStart::new("ScheduleByWeek")))?;
+        writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "ScheduleByWeek",
+        )))?;
         writer
             .create_element("WeeksInterval")
             .write_text_content(BytesText::new("1"))?;
         write_named_values_xml(writer, "DaysOfWeek", &days)?;
-        writer.write_event(Event::End(quick_xml::events::BytesEnd::new("ScheduleByWeek")))?;
+        writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+            "ScheduleByWeek",
+        )))?;
     } else {
         writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
             "ScheduleByMonthDayOfWeek",
         )))?;
-        write_named_values_xml(writer, "Weeks", &["Week1", "Week2", "Week3", "Week4", "WeekLast"])?;
+        write_named_values_xml(
+            writer,
+            "Weeks",
+            &["Week1", "Week2", "Week3", "Week4", "WeekLast"],
+        )?;
         write_named_values_xml(writer, "DaysOfWeek", &days)?;
-        let months: Vec<&str> = schedule.month.values.iter().map(|value| MONTHS[*value as usize]).collect();
+        let months: Vec<&str> = schedule
+            .month
+            .values
+            .iter()
+            .map(|value| MONTHS[*value as usize])
+            .collect();
         write_named_values_xml(writer, "Months", &months)?;
         writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
             "ScheduleByMonthDayOfWeek",
@@ -177,18 +244,31 @@ fn weekday_schedule(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) -
 
 fn any_day_schedule(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) -> Result<()> {
     if schedule.month.wildcard {
-        writer.write_event(Event::Start(quick_xml::events::BytesStart::new("ScheduleByDay")))?;
+        writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "ScheduleByDay",
+        )))?;
         writer
             .create_element("DaysInterval")
             .write_text_content(BytesText::new("1"))?;
-        writer.write_event(Event::End(quick_xml::events::BytesEnd::new("ScheduleByDay")))?;
+        writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+            "ScheduleByDay",
+        )))?;
     } else {
-        writer.write_event(Event::Start(quick_xml::events::BytesStart::new("ScheduleByMonth")))?;
+        writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "ScheduleByMonth",
+        )))?;
         let days: Vec<String> = (1..=31u32).map(|value| value.to_string()).collect();
         write_values_xml(writer, "DaysOfMonth", "Day", &days)?;
-        let months: Vec<&str> = schedule.month.values.iter().map(|value| MONTHS[*value as usize]).collect();
+        let months: Vec<&str> = schedule
+            .month
+            .values
+            .iter()
+            .map(|value| MONTHS[*value as usize])
+            .collect();
         write_named_values_xml(writer, "Months", &months)?;
-        writer.write_event(Event::End(quick_xml::events::BytesEnd::new("ScheduleByMonth")))?;
+        writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+            "ScheduleByMonth",
+        )))?;
     }
     Ok(())
 }
@@ -198,9 +278,8 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
         schedule.day_of_month.wildcard && schedule.day_of_week.wildcard && schedule.month.wildcard;
     let minute_step = evenly_spaced(&schedule.minute.values, 60);
     let hour_step = evenly_spaced(&schedule.hour.values, 24);
-    let minute_repetition = dates_wildcard
-        && schedule.hour.wildcard
-        && minute_step.is_some_and(|step| 60 % step == 0);
+    let minute_repetition =
+        dates_wildcard && schedule.hour.wildcard && minute_step.is_some_and(|step| 60 % step == 0);
     let hour_repetition = dates_wildcard
         && schedule.minute.values.len() == 1
         && hour_step.is_some_and(|step| 24 % step == 0);
@@ -222,7 +301,8 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
     }
 
     let or_split = !schedule.day_of_month.wildcard && !schedule.day_of_week.wildcard;
-    let count = schedule.hour.values.len() * schedule.minute.values.len() * if or_split { 2 } else { 1 };
+    let count =
+        schedule.hour.values.len() * schedule.minute.values.len() * if or_split { 2 } else { 1 };
     if count > 48 {
         return Err(Error::TooManyWindowsTriggers(count));
     }
@@ -231,13 +311,28 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
         for minute in &schedule.minute.values {
             let boundary = start_boundary(*hour, *minute);
             if !schedule.day_of_month.wildcard {
-                render_calendar_trigger(writer, &boundary, |writer| monthly_schedule(writer, schedule), None)?;
+                render_calendar_trigger(
+                    writer,
+                    &boundary,
+                    |writer| monthly_schedule(writer, schedule),
+                    None,
+                )?;
             }
             if !schedule.day_of_week.wildcard {
-                render_calendar_trigger(writer, &boundary, |writer| weekday_schedule(writer, schedule), None)?;
+                render_calendar_trigger(
+                    writer,
+                    &boundary,
+                    |writer| weekday_schedule(writer, schedule),
+                    None,
+                )?;
             }
             if schedule.day_of_month.wildcard && schedule.day_of_week.wildcard {
-                render_calendar_trigger(writer, &boundary, |writer| any_day_schedule(writer, schedule), None)?;
+                render_calendar_trigger(
+                    writer,
+                    &boundary,
+                    |writer| any_day_schedule(writer, schedule),
+                    None,
+                )?;
             }
         }
     }
@@ -245,7 +340,11 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
 }
 
 /// Renders the Task Scheduler XML task definition for `job`.
-pub fn render_task_xml(job: &NormalizedJob, script_path: &str, user_id: Option<&str>) -> Result<String> {
+pub fn render_task_xml(
+    job: &NormalizedJob,
+    script_path: &str,
+    user_id: Option<&str>,
+) -> Result<String> {
     let user_id = user_id.ok_or(Error::MissingUserId)?;
 
     let arguments = [
@@ -269,24 +368,35 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str, user_id: Option<&
     writer.write_event(Event::Start(
         quick_xml::events::BytesStart::new("Task").with_attributes([
             ("version", "1.2"),
-            ("xmlns", "http://schemas.microsoft.com/windows/2004/02/mit/task"),
+            (
+                "xmlns",
+                "http://schemas.microsoft.com/windows/2004/02/mit/task",
+            ),
         ]),
     ))?;
 
-    writer.write_event(Event::Start(quick_xml::events::BytesStart::new("RegistrationInfo")))?;
+    writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+        "RegistrationInfo",
+    )))?;
     writer
         .create_element("Description")
         .write_text_content(BytesText::new(&format!("native-cron job: {}", job.id)))?;
-    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("RegistrationInfo")))?;
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        "RegistrationInfo",
+    )))?;
 
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Triggers")))?;
     match &job.schedule {
         Schedule::Startup => {
-            writer.write_event(Event::Start(quick_xml::events::BytesStart::new("LogonTrigger")))?;
+            writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+                "LogonTrigger",
+            )))?;
             writer
                 .create_element("Enabled")
                 .write_text_content(BytesText::new("true"))?;
-            writer.create_element("UserId").write_text_content(BytesText::new(user_id))?;
+            writer
+                .create_element("UserId")
+                .write_text_content(BytesText::new(user_id))?;
             writer.write_event(Event::End(quick_xml::events::BytesEnd::new("LogonTrigger")))?;
         }
         Schedule::Calendar(calendar) => {
@@ -295,9 +405,15 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str, user_id: Option<&
     }
     writer.write_event(Event::End(quick_xml::events::BytesEnd::new("Triggers")))?;
 
-    writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Principals")))?;
-    writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Principal")))?;
-    writer.create_element("UserId").write_text_content(BytesText::new(user_id))?;
+    writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+        "Principals",
+    )))?;
+    writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
+        "Principal",
+    )))?;
+    writer
+        .create_element("UserId")
+        .write_text_content(BytesText::new(user_id))?;
     writer
         .create_element("LogonType")
         .write_text_content(BytesText::new("S4U"))?;
@@ -308,7 +424,9 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str, user_id: Option<&
     writer.write_event(Event::End(quick_xml::events::BytesEnd::new("Principals")))?;
 
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Settings")))?;
-    writer.create_element("Enabled").write_text_content(BytesText::new("true"))?;
+    writer
+        .create_element("Enabled")
+        .write_text_content(BytesText::new("true"))?;
     writer
         .create_element("AllowStartOnDemand")
         .write_text_content(BytesText::new("true"))?;
@@ -382,9 +500,10 @@ impl WindowsDriver {
 
     fn query(&self, id: &str) -> Result<ProcessOutput> {
         let task = Self::task_name(id);
-        self.context
-            .runner
-            .run("schtasks.exe", &["/query", "/tn", &task, "/xml", "/hresult"])
+        self.context.runner.run(
+            "schtasks.exe",
+            &["/query", "/tn", &task, "/xml", "/hresult"],
+        )
     }
 }
 
@@ -392,7 +511,11 @@ impl Driver for WindowsDriver {
     fn preflight(&self, job: &NormalizedJob) -> Result<()> {
         let (_, script_path) = self.paths(&job.id);
         render_powershell_wrapper(job);
-        render_task_xml(job, &script_path.to_string_lossy(), self.context.user_id.as_deref())?;
+        render_task_xml(
+            job,
+            &script_path.to_string_lossy(),
+            self.context.user_id.as_deref(),
+        )?;
         Ok(())
     }
 
@@ -412,7 +535,11 @@ impl Driver for WindowsDriver {
         let write_result = (|| -> Result<()> {
             let script = render_powershell_wrapper(job);
             atomic_write(&script_path, &utf16le_with_bom(&script))?;
-            let xml = render_task_xml(job, &script_path.to_string_lossy(), self.context.user_id.as_deref())?;
+            let xml = render_task_xml(
+                job,
+                &script_path.to_string_lossy(),
+                self.context.user_id.as_deref(),
+            )?;
             atomic_write(&xml_path, &utf16le_with_bom(&xml))?;
 
             let task = Self::task_name(&job.id);
@@ -447,7 +574,11 @@ impl Driver for WindowsDriver {
 
         if matches!(job.schedule, Schedule::Startup) {
             let task = Self::task_name(&job.id);
-            run_checked_owned(self.context.runner.as_ref(), "schtasks.exe", vec!["/run", "/tn", &task])?;
+            run_checked_owned(
+                self.context.runner.as_ref(),
+                "schtasks.exe",
+                vec!["/run", "/tn", &task],
+            )?;
         }
         Ok(())
     }
@@ -463,7 +594,11 @@ impl Driver for WindowsDriver {
             vec!["/change", "/tn", &task, "/enable"],
         )?;
         if self.is_startup(id) {
-            run_checked_owned(self.context.runner.as_ref(), "schtasks.exe", vec!["/run", "/tn", &task])?;
+            run_checked_owned(
+                self.context.runner.as_ref(),
+                "schtasks.exe",
+                vec!["/run", "/tn", &task],
+            )?;
         }
         Ok(())
     }
@@ -523,11 +658,18 @@ impl Driver for WindowsDriver {
             });
         }
 
-        let disabled = result.stdout.to_lowercase().contains("<enabled>false</enabled>");
+        let disabled = result
+            .stdout
+            .to_lowercase()
+            .contains("<enabled>false</enabled>");
         Ok(JobStatus {
             id: id.to_string(),
             platform: Platform::Windows,
-            state: if disabled { JobState::Inactive } else { JobState::Active },
+            state: if disabled {
+                JobState::Inactive
+            } else {
+                JobState::Active
+            },
             config_paths: vec![xml_path, script_path],
             cron: None,
             run_at_startup: false,
@@ -540,7 +682,11 @@ impl Driver for WindowsDriver {
     }
 }
 
-fn run_checked_owned(runner: &dyn CommandRunner, command: &str, args: Vec<&str>) -> Result<ProcessOutput> {
+fn run_checked_owned(
+    runner: &dyn CommandRunner,
+    command: &str,
+    args: Vec<&str>,
+) -> Result<ProcessOutput> {
     crate::process::run_checked(runner, command, &args)
 }
 
@@ -575,18 +721,23 @@ mod tests {
         assert!(xml.contains("<Interval>PT15M</Interval>"));
         assert!(xml.contains("<LogonType>S4U</LogonType>"));
 
-        let hourly_job = normalize(
-            CronOptions::new("backup", "0 * * * *", ["/bin/echo"]).cwd(dir.path()),
+        let hourly_job =
+            normalize(CronOptions::new("backup", "0 * * * *", ["/bin/echo"]).cwd(dir.path()))
+                .unwrap();
+        let hourly = render_task_xml(
+            &hourly_job,
+            "C:\\native-cron\\backup.ps1",
+            Some("DOMAIN\\me"),
         )
         .unwrap();
-        let hourly = render_task_xml(&hourly_job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
         assert!(hourly.contains("<Interval>PT60M</Interval>"));
     }
 
     #[test]
     fn renders_startup_schedules_as_windows_logon_triggers() {
         let dir = tempfile::tempdir().unwrap();
-        let job = normalize(CronOptions::at_startup("backup", ["/bin/echo"]).cwd(dir.path())).unwrap();
+        let job =
+            normalize(CronOptions::at_startup("backup", ["/bin/echo"]).cwd(dir.path())).unwrap();
         let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
         assert!(xml.contains("<LogonTrigger>"));
         assert!(!xml.contains("<CalendarTrigger>"));
@@ -608,8 +759,11 @@ mod tests {
     #[test]
     fn rejects_expressions_that_exceed_the_windows_48_trigger_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let job = normalize(CronOptions::new("backup", "*/7 * * * *", ["/bin/echo"]).cwd(dir.path())).unwrap();
-        let error = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap_err();
+        let job =
+            normalize(CronOptions::new("backup", "*/7 * * * *", ["/bin/echo"]).cwd(dir.path()))
+                .unwrap();
+        let error =
+            render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap_err();
         assert!(matches!(error, Error::TooManyWindowsTriggers(_)));
     }
 
@@ -647,7 +801,10 @@ mod tests {
                 };
             }
             if args.first() == Some(&"/change") {
-                enabled_clone.store(args.contains(&"/enable"), std::sync::atomic::Ordering::SeqCst);
+                enabled_clone.store(
+                    args.contains(&"/enable"),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 return crate::test_support::success();
             }
             if args.first() == Some(&"/delete") {
