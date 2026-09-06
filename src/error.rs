@@ -70,10 +70,6 @@ pub enum Error {
     )]
     TooManyWindowsTriggers(usize),
 
-    /// The Windows user identity could not be determined.
-    #[error("cannot register a Windows job without the current user identity")]
-    MissingUserId,
-
     /// The operating system is not macOS, Linux, or Windows.
     #[error("unsupported operating system")]
     UnsupportedPlatform,

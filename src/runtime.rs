@@ -59,16 +59,8 @@ fn build_driver() -> Result<Box<dyn Driver>> {
     }
     .join("native-cron");
 
-    let username = env::var("USERNAME").ok();
-    let domain = env::var("USERDOMAIN").ok();
-    let user_id = username.map(|username| match domain {
-        Some(domain) if !domain.is_empty() => format!("{domain}\\{username}"),
-        _ => username,
-    });
-
     Ok(Box::new(WindowsDriver::new(WindowsContext {
         root,
-        user_id,
         runner: Box::new(SystemCommandRunner),
     })))
 }

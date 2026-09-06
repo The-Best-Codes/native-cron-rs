@@ -40,7 +40,6 @@ const WEEKDAYS: [&str; 7] = [
 /// Context shared by the Task Scheduler driver; primarily overridable for tests.
 pub struct WindowsContext {
     pub root: PathBuf,
-    pub user_id: Option<String>,
     pub runner: Box<dyn CommandRunner>,
 }
 
@@ -175,6 +174,22 @@ fn write_named_values_xml(
     Ok(())
 }
 
+fn write_text_values_xml(
+    writer: &mut Writer<Vec<u8>>,
+    wrapper: &str,
+    element: &str,
+    values: &[&str],
+) -> Result<()> {
+    writer.write_event(Event::Start(quick_xml::events::BytesStart::new(wrapper)))?;
+    for value in values {
+        writer
+            .create_element(element)
+            .write_text_content(BytesText::new(value))?;
+    }
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(wrapper)))?;
+    Ok(())
+}
+
 fn monthly_schedule(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) -> Result<()> {
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
         "ScheduleByMonth",
@@ -222,11 +237,7 @@ fn weekday_schedule(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) -
         writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
             "ScheduleByMonthDayOfWeek",
         )))?;
-        write_named_values_xml(
-            writer,
-            "Weeks",
-            &["Week1", "Week2", "Week3", "Week4", "WeekLast"],
-        )?;
+        write_text_values_xml(writer, "Weeks", "Week", &["1", "2", "3", "4", "Last"])?;
         write_named_values_xml(writer, "DaysOfWeek", &days)?;
         let months: Vec<&str> = schedule
             .month
@@ -340,13 +351,7 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
 }
 
 /// Renders the Task Scheduler XML task definition for `job`.
-pub fn render_task_xml(
-    job: &NormalizedJob,
-    script_path: &str,
-    user_id: Option<&str>,
-) -> Result<String> {
-    let user_id = user_id.ok_or(Error::MissingUserId)?;
-
+pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String> {
     let arguments = [
         "-NoLogo",
         "-NonInteractive",
@@ -394,9 +399,6 @@ pub fn render_task_xml(
             writer
                 .create_element("Enabled")
                 .write_text_content(BytesText::new("true"))?;
-            writer
-                .create_element("UserId")
-                .write_text_content(BytesText::new(user_id))?;
             writer.write_event(Event::End(quick_xml::events::BytesEnd::new("LogonTrigger")))?;
         }
         Schedule::Calendar(calendar) => {
@@ -411,9 +413,6 @@ pub fn render_task_xml(
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new(
         "Principal",
     )))?;
-    writer
-        .create_element("UserId")
-        .write_text_content(BytesText::new(user_id))?;
     writer
         .create_element("LogonType")
         .write_text_content(BytesText::new("S4U"))?;
@@ -511,11 +510,7 @@ impl Driver for WindowsDriver {
     fn preflight(&self, job: &NormalizedJob) -> Result<()> {
         let (_, script_path) = self.paths(&job.id);
         render_powershell_wrapper(job);
-        render_task_xml(
-            job,
-            &script_path.to_string_lossy(),
-            self.context.user_id.as_deref(),
-        )?;
+        render_task_xml(job, &script_path.to_string_lossy())?;
         Ok(())
     }
 
@@ -535,11 +530,7 @@ impl Driver for WindowsDriver {
         let write_result = (|| -> Result<()> {
             let script = render_powershell_wrapper(job);
             atomic_write(&script_path, &utf16le_with_bom(&script))?;
-            let xml = render_task_xml(
-                job,
-                &script_path.to_string_lossy(),
-                self.context.user_id.as_deref(),
-            )?;
+            let xml = render_task_xml(job, &script_path.to_string_lossy())?;
             atomic_write(&xml_path, &utf16le_with_bom(&xml))?;
 
             let task = Self::task_name(&job.id);
@@ -720,20 +711,16 @@ mod tests {
     fn compresses_regular_intervals_into_one_windows_trigger() {
         let dir = tempfile::tempdir().unwrap();
         let job = normalize(options("backup", dir.path())).unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
         assert_eq!(xml.matches("<CalendarTrigger>").count(), 1);
         assert!(xml.contains("<Interval>PT15M</Interval>"));
         assert!(xml.contains("<LogonType>S4U</LogonType>"));
+        assert!(!xml.contains("<UserId>"));
 
         let hourly_job =
             normalize(CronOptions::new("backup", "0 * * * *", [test_executable()]).cwd(dir.path()))
                 .unwrap();
-        let hourly = render_task_xml(
-            &hourly_job,
-            "C:\\native-cron\\backup.ps1",
-            Some("DOMAIN\\me"),
-        )
-        .unwrap();
+        let hourly = render_task_xml(&hourly_job, "C:\\native-cron\\backup.ps1").unwrap();
         assert!(hourly.contains("<Interval>PT60M</Interval>"));
     }
 
@@ -742,9 +729,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let job = normalize(CronOptions::at_startup("backup", [test_executable()]).cwd(dir.path()))
             .unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
         assert!(xml.contains("<LogonTrigger>"));
         assert!(!xml.contains("<CalendarTrigger>"));
+        assert!(!xml.contains("<UserId>"));
     }
 
     #[test]
@@ -754,10 +742,11 @@ mod tests {
             CronOptions::new("backup", "0 9 15 JAN MON-FRI", [test_executable()]).cwd(dir.path()),
         )
         .unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
         assert_eq!(xml.matches("<CalendarTrigger>").count(), 2);
         assert!(xml.contains("<ScheduleByMonth>"));
         assert!(xml.contains("<ScheduleByMonthDayOfWeek>"));
+        assert!(xml.contains("<Weeks><Week>1</Week><Week>2</Week><Week>3</Week><Week>4</Week><Week>Last</Week></Weeks>"));
     }
 
     #[test]
@@ -767,8 +756,7 @@ mod tests {
             CronOptions::new("backup", "*/7 * * * *", [test_executable()]).cwd(dir.path()),
         )
         .unwrap();
-        let error =
-            render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap_err();
+        let error = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap_err();
         assert!(matches!(error, Error::TooManyWindowsTriggers(_)));
     }
 
@@ -820,7 +808,6 @@ mod tests {
         });
         let driver = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
-            user_id: Some("DOMAIN\\me".to_string()),
             runner: Box::new(runner),
         });
 
@@ -863,7 +850,6 @@ mod tests {
         });
         let driver = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
-            user_id: Some("DOMAIN\\me".to_string()),
             runner: Box::new(runner),
         });
 
