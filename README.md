@@ -112,10 +112,10 @@ The executable and any relative `cwd`, `stdout`, or `stderr` paths are resolved 
 The `Job` returned by `register` operates on the persistent native job:
 
 ```rust
-job.enable()?;  // load and start again
+job.enable()?; // load and start again
 job.disable()?; // disable/unload, keeping the configuration
-job.remove()?;  // unregister and delete configuration, idempotent
-job.status()?;  // report current native state
+job.remove()?; // unregister and delete configuration, idempotent
+job.status()?; // report current native state
 ```
 
 A handle to a job registered by another process can be fetched by id with `native_cron::job`, and a job can be removed outright with `native_cron::remove`:
@@ -135,9 +135,9 @@ A handle from `native_cron::job` never saw the job's configuration, so its `stat
 pub struct JobStatus {
     pub id: String,
     pub platform: Platform, // Darwin | Linux | Windows
-    pub state: JobState,    // Active | Inactive | Missing
+    pub state: JobState, // Active | Inactive | Missing
     pub config_paths: Vec<PathBuf>,
-    pub cron: Option<String>,       // normalized expression, if known
+    pub cron: Option<String>, // normalized expression, if known
     pub run_at_startup: bool,
     pub command: Option<Vec<String>>, // resolved, if known
     pub cwd: Option<PathBuf>,
