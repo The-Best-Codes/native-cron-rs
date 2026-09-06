@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+use chrono::Local;
 use quick_xml::events::{BytesDecl, BytesText, Event};
 use quick_xml::writer::Writer;
 
@@ -77,7 +79,14 @@ fn evenly_spaced(values: &[u32], period: u32) -> Option<u32> {
 }
 
 fn start_boundary(hour: u32, minute: u32) -> String {
-    format!("2000-01-01T{hour:02}:{minute:02}:00")
+    #[cfg(target_os = "windows")]
+    let today = Local::today();
+    #[cfg(target_os = "windows")]
+    let date_str = today.format("%Y-%m-%d").to_string();
+    #[cfg(not(target_os = "windows"))]
+    let date_str = "1970-01-01".to_string();
+
+    format!("{date_str}T{hour:02}:{minute:02}:00")
 }
 
 /// Renders the PowerShell wrapper script that Task Scheduler invokes.
