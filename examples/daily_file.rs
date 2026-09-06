@@ -112,7 +112,7 @@ fn local_time_from_os() -> Option<String> {
             .output()
             .ok()?;
 
-        return output_to_string(output.stdout);
+        output_to_string(output.stdout)
     }
 
     #[cfg(not(windows))]
@@ -122,7 +122,7 @@ fn local_time_from_os() -> Option<String> {
             .output()
             .ok()?;
 
-        return output_to_string(output.stdout);
+        output_to_string(output.stdout)
     }
 }
 

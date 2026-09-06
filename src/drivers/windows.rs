@@ -80,7 +80,7 @@ fn evenly_spaced(values: &[u32], period: u32) -> Option<u32> {
 
 fn start_boundary(hour: u32, minute: u32) -> String {
     #[cfg(target_os = "windows")]
-    let today = Local::today();
+    let today = Local::now();
     #[cfg(target_os = "windows")]
     let date_str = today.format("%Y-%m-%d").to_string();
     #[cfg(not(target_os = "windows"))]
