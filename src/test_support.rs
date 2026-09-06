@@ -35,6 +35,13 @@ impl CommandRunner for FakeRunner {
     }
 }
 
+pub fn test_executable() -> String {
+    std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub fn success() -> ProcessOutput {
     ProcessOutput {
         code: 0,

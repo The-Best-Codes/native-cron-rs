@@ -694,13 +694,17 @@ fn run_checked_owned(
 mod tests {
     use super::*;
     use crate::normalize::normalize;
-    use crate::test_support::FakeRunner;
+    use crate::test_support::{test_executable, FakeRunner};
     use crate::types::CronOptions;
 
     fn options(id: &str, cwd: &std::path::Path) -> CronOptions {
-        CronOptions::new(id, "*/15 * * * *", ["/bin/echo", "it's safe"])
-            .cwd(cwd)
-            .env("TOKEN", "it's secret")
+        CronOptions::new(
+            id,
+            "*/15 * * * *",
+            [test_executable(), "it's safe".to_string()],
+        )
+        .cwd(cwd)
+        .env("TOKEN", "it's secret")
     }
 
     #[test]
@@ -722,7 +726,7 @@ mod tests {
         assert!(xml.contains("<LogonType>S4U</LogonType>"));
 
         let hourly_job =
-            normalize(CronOptions::new("backup", "0 * * * *", ["/bin/echo"]).cwd(dir.path()))
+            normalize(CronOptions::new("backup", "0 * * * *", [test_executable()]).cwd(dir.path()))
                 .unwrap();
         let hourly = render_task_xml(
             &hourly_job,
@@ -736,8 +740,8 @@ mod tests {
     #[test]
     fn renders_startup_schedules_as_windows_logon_triggers() {
         let dir = tempfile::tempdir().unwrap();
-        let job =
-            normalize(CronOptions::at_startup("backup", ["/bin/echo"]).cwd(dir.path())).unwrap();
+        let job = normalize(CronOptions::at_startup("backup", [test_executable()]).cwd(dir.path()))
+            .unwrap();
         let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
         assert!(xml.contains("<LogonTrigger>"));
         assert!(!xml.contains("<CalendarTrigger>"));
@@ -747,7 +751,7 @@ mod tests {
     fn splits_day_of_month_and_weekday_restrictions_to_preserve_or_logic() {
         let dir = tempfile::tempdir().unwrap();
         let job = normalize(
-            CronOptions::new("backup", "0 9 15 JAN MON-FRI", ["/bin/echo"]).cwd(dir.path()),
+            CronOptions::new("backup", "0 9 15 JAN MON-FRI", [test_executable()]).cwd(dir.path()),
         )
         .unwrap();
         let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap();
@@ -759,9 +763,10 @@ mod tests {
     #[test]
     fn rejects_expressions_that_exceed_the_windows_48_trigger_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let job =
-            normalize(CronOptions::new("backup", "*/7 * * * *", ["/bin/echo"]).cwd(dir.path()))
-                .unwrap();
+        let job = normalize(
+            CronOptions::new("backup", "*/7 * * * *", [test_executable()]).cwd(dir.path()),
+        )
+        .unwrap();
         let error =
             render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("DOMAIN\\me")).unwrap_err();
         assert!(matches!(error, Error::TooManyWindowsTriggers(_)));

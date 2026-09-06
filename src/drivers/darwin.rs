@@ -348,11 +348,11 @@ impl Driver for DarwinDriver {
 mod tests {
     use super::*;
     use crate::normalize::normalize;
-    use crate::test_support::FakeRunner;
+    use crate::test_support::{test_executable, FakeRunner};
     use crate::types::CronOptions;
 
     fn options(id: &str, cwd: &std::path::Path) -> CronOptions {
-        CronOptions::new(id, "0 2 15 * 5", ["/bin/echo", "a&b"]).cwd(cwd)
+        CronOptions::new(id, "0 2 15 * 5", [test_executable(), "a&b".to_string()]).cwd(cwd)
     }
 
     #[test]
@@ -369,8 +369,9 @@ mod tests {
     #[test]
     fn renders_startup_schedules_as_launchd_run_at_load_jobs() {
         let dir = tempfile::tempdir().unwrap();
-        let job = normalize(CronOptions::at_startup("login-task", ["/bin/echo"]).cwd(dir.path()))
-            .unwrap();
+        let job =
+            normalize(CronOptions::at_startup("login-task", [test_executable()]).cwd(dir.path()))
+                .unwrap();
         let xml = String::from_utf8(render_plist(&job).unwrap()).unwrap();
         assert!(xml.contains("<key>RunAtLoad</key>"));
         assert!(!xml.contains("StartCalendarInterval"));

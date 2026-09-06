@@ -363,13 +363,21 @@ impl Driver for LinuxDriver {
 mod tests {
     use super::*;
     use crate::normalize::normalize;
-    use crate::test_support::FakeRunner;
+    use crate::test_support::{test_executable, FakeRunner};
     use crate::types::CronOptions;
 
     fn options(id: &str, cwd: &std::path::Path) -> CronOptions {
-        CronOptions::new(id, "0 6 15 * 1", ["/bin/echo", "100%", "has space"])
-            .cwd(cwd)
-            .env("VALUE", "a$b%")
+        CronOptions::new(
+            id,
+            "0 6 15 * 1",
+            [
+                test_executable(),
+                "100%".to_string(),
+                "has space".to_string(),
+            ],
+        )
+        .cwd(cwd)
+        .env("VALUE", "a$b%")
     }
 
     #[test]
@@ -383,7 +391,8 @@ mod tests {
         let service = render_service(&job).unwrap();
         let timer = render_timer(&job, calendar).unwrap();
 
-        assert!(service.contains("ExecStart=\"/bin/echo\" \"100%%\" \"has space\""));
+        let executable = crate::escape::systemd_exec_quote(&test_executable());
+        assert!(service.contains(&format!("ExecStart={executable} \"100%%\" \"has space\"")));
         assert!(service.contains("Environment=\"VALUE=a$b%%\""));
         assert!(timer.contains("OnCalendar=*-*-15 6:0:00"));
         assert!(timer.contains("OnCalendar=Mon *-*-* 6:0:00"));
@@ -393,8 +402,8 @@ mod tests {
     #[test]
     fn renders_startup_schedules_as_enabled_services_without_timers() {
         let dir = tempfile::tempdir().unwrap();
-        let job =
-            normalize(CronOptions::at_startup("login", ["/bin/echo"]).cwd(dir.path())).unwrap();
+        let job = normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+            .unwrap();
         let service = render_service(&job).unwrap();
         assert!(service.contains("RemainAfterExit=yes"));
         assert!(service.contains("WantedBy=default.target"));
