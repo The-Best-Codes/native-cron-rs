@@ -14,7 +14,11 @@ The crate compiles the platform driver that matches the host OS only. Cross-plat
 
 ```sh
 cargo test
+
+# Assuming you're running on Linux
 cargo clippy --all-targets
+cargo clippy --target x86_64-pc-windows-gnu --all-targets
+cargo clippy --target x86_64-apple-darwin --all-targets
 ```
 
 Tests never touch the real scheduler. Every driver takes a `CommandRunner` trait object, and tests inject a `FakeRunner` (see `src/test_support.rs`) that records calls and returns canned output. Platform contexts such as the home directory or config root are likewise injectable (`DarwinContext`, `LinuxContext`, `WindowsContext`), so tests write to tempdirs from `tempfile` instead of your real configuration directories.
