@@ -215,7 +215,6 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 | `NotRegistered(String)`             | `enable` or `disable` was called on an id that is not registered.                                               |
 | `TooManyIntervals(usize)`           | The expression expands to more than 10,000 launchd calendar entries.                                            |
 | `TooManyWindowsTriggers(usize)`     | The expression needs more than 48 Task Scheduler triggers.                                                      |
-| `MissingUserId`                     | The Windows user identity could not be determined.                                                              |
 | `UnsupportedPlatform`               | The operating system is not macOS, Linux, or Windows.                                                           |
 | `CommandFailed`                     | A native command (`launchctl`, `systemctl`, `schtasks`) exited non-zero.                                        |
 | `Spawn`                             | A native command could not be started.                                                                          |
