@@ -131,7 +131,11 @@ pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
         id: options.id,
         command,
         schedule,
-        cwd: options.cwd.map(|cwd| resolve_from(&resolution_base, &cwd)),
+        cwd: if options.cwd.is_some() {
+            Some(resolution_base)
+        } else {
+            None
+        },
         env,
         stdout,
         stderr,
@@ -240,5 +244,22 @@ mod tests {
         options.cron = Some("@login".to_string());
         let job = normalize(options).unwrap();
         assert_eq!(job.schedule.normalized(), "@reboot");
+    }
+
+    #[test]
+    fn resolves_a_relative_cwd_once_against_the_current_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let mut options = valid_options("relative-cwd");
+        options.cwd = Some(PathBuf::from("subdir"));
+
+        let job = normalize(options).unwrap();
+        std::env::set_current_dir(original).unwrap();
+
+        assert_eq!(job.cwd.as_deref(), Some(subdir.as_path()));
     }
 }
