@@ -424,7 +424,11 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String>
     )))?;
     writer
         .create_element("LogonType")
-        .write_text_content(BytesText::new("S4U"))?;
+        .write_text_content(BytesText::new(if job.windows.visible {
+            "InteractiveToken"
+        } else {
+            "S4U"
+        }))?;
     writer
         .create_element("RunLevel")
         .write_text_content(BytesText::new("LeastPrivilege"))?;
@@ -544,10 +548,16 @@ impl Driver for WindowsDriver {
 
             let task = Self::task_name(&job.id);
             let xml_str = xml_path.to_string_lossy();
+            // `/it` (InteractiveToken) and `/np` (S4U) select the same logon
+            // type as the `<LogonType>` written into the XML above. Task
+            // Scheduler has a known quirk where the XML's `<LogonType>` alone
+            // is not always honored via `/create /xml`, so it must be
+            // reiterated on the command line.
+            let logon_flag = if job.windows.visible { "/it" } else { "/np" };
             run_checked_owned(
                 self.context.runner.as_ref(),
                 "schtasks.exe",
-                vec!["/create", "/xml", &xml_str, "/tn", &task, "/np", "/f"],
+                vec!["/create", "/xml", &xml_str, "/tn", &task, logon_flag, "/f"],
             )?;
             Ok(())
         })();
@@ -734,6 +744,18 @@ mod tests {
     }
 
     #[test]
+    fn renders_interactive_token_logon_type_when_windows_visible_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = normalize(
+            options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),
+        )
+        .unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(!xml.contains("<LogonType>S4U</LogonType>"));
+    }
+
+    #[test]
     fn renders_startup_schedules_as_windows_logon_triggers() {
         let dir = tempfile::tempdir().unwrap();
         let job = normalize(CronOptions::at_startup("backup", [test_executable()]).cwd(dir.path()))
@@ -835,6 +857,40 @@ mod tests {
         assert_eq!(driver.status("backup").unwrap().state, JobState::Active);
         driver.remove("backup").unwrap();
         assert_eq!(driver.status("backup").unwrap().state, JobState::Missing);
+    }
+
+    #[test]
+    fn passes_interactive_token_flag_to_schtasks_when_windows_visible_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen_args = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_args_clone = seen_args.clone();
+        let runner = FakeRunner::new(move |command, args| {
+            if command == "schtasks.exe" && args.first() == Some(&"/create") {
+                *seen_args_clone.lock().unwrap() = args.iter().map(|arg| arg.to_string()).collect();
+            }
+            if command == "schtasks.exe" && args.first() == Some(&"/query") {
+                return ProcessOutput {
+                    code: 0x8007_0002u32 as i32,
+                    stdout: String::new(),
+                    stderr: "Task not found".to_string(),
+                };
+            }
+            crate::test_support::success()
+        });
+        let driver = WindowsDriver::new(WindowsContext {
+            root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+
+        let job = normalize(
+            options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),
+        )
+        .unwrap();
+        driver.register(&job).unwrap();
+
+        let args = seen_args.lock().unwrap();
+        assert!(args.iter().any(|arg| arg == "/it"));
+        assert!(!args.iter().any(|arg| arg == "/np"));
     }
 
     #[test]

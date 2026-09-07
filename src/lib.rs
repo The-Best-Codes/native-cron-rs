@@ -45,7 +45,7 @@ mod types;
 pub use error::{Error, Result};
 pub use process::{CommandRunner, ProcessOutput};
 pub use schedule::{CalendarSchedule, CronField, Schedule};
-pub use types::{CronOptions, JobState, JobStatus, Platform};
+pub use types::{CronOptions, JobState, JobStatus, Platform, WindowsOptions};
 
 use std::sync::Arc;
 

@@ -33,6 +33,23 @@ pub enum JobState {
     Missing,
 }
 
+/// Windows-specific options for [`CronOptions`]. Has no effect on other
+/// platforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowsOptions {
+    /// Runs the job with Task Scheduler's `InteractiveToken` logon type
+    /// instead of the default `S4U` logon type.
+    ///
+    /// Task Scheduler always runs `S4U` jobs in a non-interactive session,
+    /// even while the target user is logged on interactively, so any window
+    /// the command creates can never be shown. Setting `visible` to `true`
+    /// runs the job in the user's interactive session instead, so its
+    /// windows are visible, at the cost of the job not running at all while
+    /// that user isn't logged on (unlike `S4U`, which runs regardless of
+    /// logon state).
+    pub visible: bool,
+}
+
 /// Options used to register a job with [`crate::register`].
 ///
 /// Only `id` and `command` are required, along with exactly one of `cron` or
@@ -69,6 +86,8 @@ pub struct CronOptions {
     /// configuration instead of returning an error. The job is restarted
     /// with the new configuration.
     pub overwrite: bool,
+    /// Windows-specific options. Has no effect on other platforms.
+    pub windows: WindowsOptions,
 }
 
 impl CronOptions {
@@ -128,6 +147,12 @@ impl CronOptions {
     /// Allows this registration to replace an existing job with the same id.
     pub fn overwrite(mut self, overwrite: bool) -> Self {
         self.overwrite = overwrite;
+        self
+    }
+
+    /// Sets Windows-specific options. Has no effect on other platforms.
+    pub fn windows(mut self, windows: WindowsOptions) -> Self {
+        self.windows = windows;
         self
     }
 }

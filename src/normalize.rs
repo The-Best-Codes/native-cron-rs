@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::files::resolve_from;
 use crate::schedule::Schedule;
-use crate::types::CronOptions;
+use crate::types::{CronOptions, WindowsOptions};
 
 const ID_PATTERN_MAX_LEN: usize = 100;
 
@@ -67,6 +67,8 @@ pub struct NormalizedJob {
     pub stdout: Option<PathBuf>,
     pub stderr: Option<PathBuf>,
     pub overwrite: bool,
+    /// Windows-specific options. Ignored by other platforms' drivers.
+    pub windows: WindowsOptions,
 }
 
 /// Validates and resolves [`CronOptions`] into a [`NormalizedJob`].
@@ -140,6 +142,7 @@ pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
         stdout,
         stderr,
         overwrite: options.overwrite,
+        windows: options.windows,
     })
 }
 
