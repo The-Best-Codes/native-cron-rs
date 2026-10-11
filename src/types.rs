@@ -122,6 +122,31 @@ impl CronOptions {
         }
     }
 
+    /// Creates options for a calendar-scheduled job that opens `url` (a web
+    /// page, a file, or an app's custom URL scheme such as a deep link) with
+    /// the user's default handler, in the user's graphical session.
+    ///
+    /// The command is chosen per platform so that the opened app outlives the
+    /// job and no console window appears:
+    ///
+    /// - macOS: `/usr/bin/open <url>`.
+    /// - Linux: `systemd-run --user --scope --quiet -- xdg-open <url>`, so the
+    ///   opened app gets its own scope instead of being killed when the job's
+    ///   oneshot service exits.
+    /// - Windows: `rundll32.exe url.dll,FileProtocolHandler <url>` with
+    ///   [`WindowsOptions::visible`] set, since the URL has to open in the
+    ///   user's interactive session.
+    pub fn open_url(
+        id: impl Into<String>,
+        cron: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
+        Self {
+            windows: WindowsOptions { visible: true },
+            ..Self::new(id, cron, open_url_command(current_platform(), url.into()))
+        }
+    }
+
     /// Sets the working directory.
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
@@ -161,6 +186,36 @@ impl CronOptions {
     }
 }
 
+fn current_platform() -> Platform {
+    if cfg!(target_os = "macos") {
+        Platform::Darwin
+    } else if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else {
+        Platform::Linux
+    }
+}
+
+fn open_url_command(platform: Platform, url: String) -> Vec<String> {
+    let prefix: &[&str] = match platform {
+        Platform::Darwin => &["/usr/bin/open"],
+        Platform::Linux => &[
+            "systemd-run",
+            "--user",
+            "--scope",
+            "--quiet",
+            "--",
+            "xdg-open",
+        ],
+        Platform::Windows => &["rundll32.exe", "url.dll,FileProtocolHandler"],
+    };
+    prefix
+        .iter()
+        .map(|arg| arg.to_string())
+        .chain(std::iter::once(url))
+        .collect()
+}
+
 /// The current status of a registered job, including a copy of the
 /// configuration it was registered with (when known).
 #[derive(Debug, Clone)]
@@ -187,4 +242,45 @@ pub struct JobStatus {
     pub stdout: Option<PathBuf>,
     /// Standard error path, if this handle knows its configuration.
     pub stderr: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opens_urls_with_each_platforms_default_handler() {
+        let url = "agent-one://cron?v=1&id=x";
+        assert_eq!(
+            open_url_command(Platform::Darwin, url.to_string()),
+            ["/usr/bin/open", url]
+        );
+        assert_eq!(
+            open_url_command(Platform::Linux, url.to_string()),
+            [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                "--",
+                "xdg-open",
+                url
+            ]
+        );
+        assert_eq!(
+            open_url_command(Platform::Windows, url.to_string()),
+            ["rundll32.exe", "url.dll,FileProtocolHandler", url]
+        );
+    }
+
+    #[test]
+    fn open_url_jobs_are_visible_on_windows() {
+        let options = CronOptions::open_url("open", "0 9 * * *", "https://example.com");
+        assert!(options.windows.visible);
+        assert_eq!(options.cron.as_deref(), Some("0 9 * * *"));
+        assert_eq!(
+            options.command.last().map(String::as_str),
+            Some("https://example.com")
+        );
+    }
 }

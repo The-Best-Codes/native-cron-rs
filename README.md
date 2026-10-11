@@ -95,6 +95,24 @@ use native_cron::CronOptions;
 let job = native_cron::register(CronOptions::at_startup("agent", ["/usr/local/bin/agent"]))?;
 ```
 
+A job that opens a URL (a web page, a file, or your app's own deep link) in the user's session uses `open_url`. It picks a command per platform that doesn't flash a console window and doesn't kill the opened app when the job finishes:
+
+```rust
+use native_cron::CronOptions;
+
+let job = native_cron::register(CronOptions::open_url(
+    "morning-briefing",
+    "0 7 * * 1-5",
+    "my-app://run?task=briefing",
+))?;
+```
+
+| Platform | Command                                                         |
+| -------- | --------------------------------------------------------------- |
+| macOS    | `/usr/bin/open <url>`                                           |
+| Linux    | `systemd-run --user --scope --quiet -- xdg-open <url>`          |
+| Windows  | `rundll32.exe url.dll,FileProtocolHandler <url>`, `visible: true` |
+
 `@reboot` and `@login` are accepted as schedule strings and mean the same thing, but `at_startup` is the preferred spelling.
 
 Registering an `id` that already exists returns `Error::AlreadyExists` unless `overwrite(true)` is set, in which case the existing schedule and command are replaced and the job is restarted.
