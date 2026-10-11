@@ -93,9 +93,18 @@ fn start_boundary(hour: u32, minute: u32) -> String {
 /// Whether Task Scheduler can run the command itself instead of going through
 /// the PowerShell wrapper. Only done for visible jobs: the wrapper's console
 /// would show up in the user's session, and there is nothing (env vars or
-/// output redirection) that needs the wrapper anyway.
+/// output redirection) that needs the wrapper anyway. The command also has to
+/// be an `.exe`; anything else (`.ps1`, `.bat`, a file opened through its
+/// association) still needs PowerShell's `&` to start it.
 fn runs_directly(job: &NormalizedJob) -> bool {
-    job.windows.visible && job.env.is_empty() && job.stdout.is_none() && job.stderr.is_none()
+    let is_exe = std::path::Path::new(&job.command[0])
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+    is_exe
+        && job.windows.visible
+        && job.env.is_empty()
+        && job.stdout.is_none()
+        && job.stderr.is_none()
 }
 
 /// `LastTaskResult` values that are Task Scheduler states rather than an exit
@@ -869,7 +878,7 @@ mod tests {
     #[test]
     fn runs_visible_jobs_directly_without_a_powershell_console() {
         let dir = tempfile::tempdir().unwrap();
-        let job = normalize(
+        let mut job = normalize(
             CronOptions::new(
                 "backup",
                 "0 9 * * *",
@@ -879,10 +888,16 @@ mod tests {
             .windows(crate::types::WindowsOptions { visible: true }),
         )
         .unwrap();
+        // Normalization resolves the real test binary; swap in Windows paths.
+        job.command[0] = "C:\\Windows\\System32\\rundll32.EXE".to_string();
         let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
-        assert!(xml.contains(&format!("<Command>{}</Command>", test_executable())));
+        assert!(xml.contains("<Command>C:\\Windows\\System32\\rundll32.EXE</Command>"));
         assert!(xml.contains("<Arguments>agent-one://cron?v=1&amp;id=x</Arguments>"));
         assert!(!xml.contains("powershell.exe"));
+
+        job.command[0] = "C:\\Scripts\\job.ps1".to_string();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains("<Command>powershell.exe</Command>"));
 
         let wrapped = normalize(
             options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),

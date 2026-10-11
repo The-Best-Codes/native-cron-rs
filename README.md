@@ -325,7 +325,7 @@ loginctl enable-linger "$USER"
 
 The task runs a private PowerShell wrapper script under the registering user with S4U logon. No password is stored, and calendar tasks can run while the user is logged out. S4U tasks cannot access Windows-authenticated network resources such as SMB shares or mapped drives.
 
-With `.windows(WindowsOptions { visible: true })` the task runs in the user's interactive session instead, so the command can show windows, but it only runs while the user is logged on. A visible job with no `env`, `stdout`, or `stderr` skips the PowerShell wrapper and is started by Task Scheduler directly, so no console window flashes; otherwise the wrapper runs with `-WindowStyle Hidden`.
+With `.windows(WindowsOptions { visible: true })` the task runs in the user's interactive session instead, so the command can show windows, but it only runs while the user is logged on. A visible job whose command is an `.exe` and that sets no `env`, `stdout`, or `stderr` skips the PowerShell wrapper and is started by Task Scheduler directly, so no console window flashes; otherwise the wrapper runs with `-WindowStyle Hidden`.
 
 Task Scheduler permits at most 48 triggers per task. Evenly spaced minute or hour intervals are compressed into a single repetition trigger (`*/15 * * * *` becomes one trigger with `PT15M`), and expressions that would still exceed the limit are rejected with `Error::TooManyWindowsTriggers`.
 

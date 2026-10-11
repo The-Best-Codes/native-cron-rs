@@ -49,9 +49,10 @@ pub struct WindowsOptions {
     /// that user isn't logged on (unlike `S4U`, which runs regardless of
     /// logon state).
     ///
-    /// Visible jobs without `env`, `stdout`, or `stderr` are started by Task
-    /// Scheduler directly, so no PowerShell console appears. If one of those
-    /// is set, the PowerShell wrapper is still used, with its window hidden.
+    /// Visible jobs whose command is an `.exe` and that don't set `env`,
+    /// `stdout`, or `stderr` are started by Task Scheduler directly, so no
+    /// PowerShell console appears. Otherwise the PowerShell wrapper is still
+    /// used, with its window hidden.
     pub visible: bool,
 }
 
