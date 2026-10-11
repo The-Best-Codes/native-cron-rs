@@ -185,6 +185,17 @@ impl LinuxDriver {
         }
     }
 
+    /// Forgets when a stopped timer last fired. `Persistent=true` otherwise
+    /// fires the job immediately on start if it "missed" a run while it was
+    /// disabled or under its previous schedule. Best effort: `clean` needs
+    /// systemd 243+, and older versions just keep the old behavior.
+    fn clear_timer_state(&self, unit: &str) {
+        let _ = self
+            .context
+            .runner
+            .run("systemctl", &["--user", "clean", "--what=state", unit]);
+    }
+
     fn disable_unit(&self, unit: &str) -> Result<()> {
         run_checked(
             self.context.runner.as_ref(),
@@ -256,6 +267,7 @@ impl Driver for LinuxDriver {
                 )?;
             }
             Schedule::Calendar(_) => {
+                self.clear_timer_state(&unit);
                 run_checked(
                     self.context.runner.as_ref(),
                     "systemctl",
@@ -282,6 +294,7 @@ impl Driver for LinuxDriver {
                 &["--user", "start", "--no-block", &unit],
             )?;
         } else {
+            self.clear_timer_state(&unit);
             run_checked(
                 self.context.runner.as_ref(),
                 "systemctl",
@@ -461,6 +474,39 @@ mod tests {
         assert_eq!(
             driver.status("daily-sync").unwrap().state,
             JobState::Missing
+        );
+    }
+
+    #[test]
+    fn clears_persistent_timer_state_before_starting_a_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls_clone = calls.clone();
+        let runner = FakeRunner::new(move |command, args| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push(format!("{command} {}", args.join(" ")));
+            crate::test_support::success()
+        });
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+
+        let job = normalize(options("resume", dir.path())).unwrap();
+        driver.register(&job).unwrap();
+        driver.disable("resume").unwrap();
+        driver.enable("resume").unwrap();
+
+        let calls = calls.lock().unwrap();
+        let position = |call: &str| calls.iter().position(|seen| seen == call).unwrap();
+        let clean = "systemctl --user clean --what=state native-cron-resume.timer";
+        assert_eq!(calls.iter().filter(|seen| *seen == clean).count(), 2);
+        assert!(position(clean) < position("systemctl --user restart native-cron-resume.timer"));
+        assert!(
+            calls.iter().rposition(|seen| seen == clean).unwrap()
+                < position("systemctl --user enable --now native-cron-resume.timer")
         );
     }
 
