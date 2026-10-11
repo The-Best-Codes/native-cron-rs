@@ -89,6 +89,14 @@ fn start_boundary(hour: u32, minute: u32) -> String {
     format!("{date_str}T{hour:02}:{minute:02}:00")
 }
 
+/// Whether Task Scheduler can run the command itself instead of going through
+/// the PowerShell wrapper. Only done for visible jobs: the wrapper's console
+/// would show up in the user's session, and there is nothing (env vars or
+/// output redirection) that needs the wrapper anyway.
+fn runs_directly(job: &NormalizedJob) -> bool {
+    job.windows.visible && job.env.is_empty() && job.stdout.is_none() && job.stderr.is_none()
+}
+
 /// Renders the PowerShell wrapper script that Task Scheduler invokes.
 pub fn render_powershell_wrapper(job: &NormalizedJob) -> String {
     let mut script = String::from("$ErrorActionPreference = 'Stop'\n");
@@ -361,19 +369,24 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
 
 /// Renders the Task Scheduler XML task definition for `job`.
 pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String> {
-    let arguments = [
-        "-NoLogo",
-        "-NonInteractive",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        script_path,
-    ]
-    .iter()
-    .map(|arg| windows_argument(arg))
-    .collect::<Vec<_>>()
-    .join(" ");
+    let (program, arguments) = if runs_directly(job) {
+        (job.command[0].as_str(), job.command[1..].to_vec())
+    } else {
+        let mut arguments = vec!["-NoLogo", "-NonInteractive", "-NoProfile"];
+        if job.windows.visible {
+            arguments.extend(["-WindowStyle", "Hidden"]);
+        }
+        arguments.extend(["-ExecutionPolicy", "Bypass", "-File", script_path]);
+        (
+            "powershell.exe",
+            arguments.into_iter().map(str::to_string).collect(),
+        )
+    };
+    let arguments = arguments
+        .iter()
+        .map(|arg| windows_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let mut writer = Writer::new(Vec::new());
 
@@ -466,10 +479,12 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String>
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Exec")))?;
     writer
         .create_element("Command")
-        .write_text_content(BytesText::new("powershell.exe"))?;
-    writer
-        .create_element("Arguments")
-        .write_text_content(BytesText::new(&arguments))?;
+        .write_text_content(BytesText::new(program))?;
+    if !arguments.is_empty() {
+        writer
+            .create_element("Arguments")
+            .write_text_content(BytesText::new(&arguments))?;
+    }
     if let Some(cwd) = &job.cwd {
         writer
             .create_element("WorkingDirectory")
@@ -522,7 +537,9 @@ impl WindowsDriver {
 impl Driver for WindowsDriver {
     fn preflight(&self, job: &NormalizedJob) -> Result<()> {
         let (_, script_path) = self.paths(&job.id);
-        render_powershell_wrapper(job);
+        if !runs_directly(job) {
+            render_powershell_wrapper(job);
+        }
         render_task_xml(job, &script_path.to_string_lossy())?;
         Ok(())
     }
@@ -541,8 +558,14 @@ impl Driver for WindowsDriver {
         let previous_script = std::fs::read(&script_path).ok();
 
         let write_result = (|| -> Result<()> {
-            let script = render_powershell_wrapper(job);
-            atomic_write(&script_path, &utf16le_with_bom(&script))?;
+            if runs_directly(job) {
+                if path_exists(&script_path) {
+                    std::fs::remove_file(&script_path)?;
+                }
+            } else {
+                let script = render_powershell_wrapper(job);
+                atomic_write(&script_path, &utf16le_with_bom(&script))?;
+            }
             let xml = render_task_xml(job, &script_path.to_string_lossy())?;
             atomic_write(&xml_path, &utf16le_with_bom(&xml))?;
 
@@ -753,6 +776,37 @@ mod tests {
         let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<LogonType>S4U</LogonType>"));
+    }
+
+    #[test]
+    fn runs_visible_jobs_directly_without_a_powershell_console() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = normalize(
+            CronOptions::new(
+                "backup",
+                "0 9 * * *",
+                [test_executable(), "agent-one://cron?v=1&id=x".to_string()],
+            )
+            .cwd(dir.path())
+            .windows(crate::types::WindowsOptions { visible: true }),
+        )
+        .unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains(&format!("<Command>{}</Command>", test_executable())));
+        assert!(xml.contains("<Arguments>agent-one://cron?v=1&amp;id=x</Arguments>"));
+        assert!(!xml.contains("powershell.exe"));
+
+        let wrapped = normalize(
+            options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),
+        )
+        .unwrap();
+        let xml = render_task_xml(&wrapped, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains("<Command>powershell.exe</Command>"));
+        assert!(xml.contains("-WindowStyle Hidden"));
+
+        let hidden = normalize(options("backup", dir.path())).unwrap();
+        let xml = render_task_xml(&hidden, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(!xml.contains("-WindowStyle"));
     }
 
     #[test]

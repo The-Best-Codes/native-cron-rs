@@ -47,6 +47,10 @@ pub struct WindowsOptions {
     /// windows are visible, at the cost of the job not running at all while
     /// that user isn't logged on (unlike `S4U`, which runs regardless of
     /// logon state).
+    ///
+    /// Visible jobs without `env`, `stdout`, or `stderr` are started by Task
+    /// Scheduler directly, so no PowerShell console appears. If one of those
+    /// is set, the PowerShell wrapper is still used, with its window hidden.
     pub visible: bool,
 }
 
