@@ -363,13 +363,30 @@ impl Driver for LinuxDriver {
     fn run_now(&self, id: &str) -> Result<()> {
         ensure_runnable(&self.status(id)?)?;
         // A startup service stays active after it exits (`RemainAfterExit`),
-        // so `start` would be a no-op; restart it instead. A calendar job's
-        // service is only active while it's running, and `start` then leaves
-        // that run alone rather than overlapping it.
+        // so `start` would be a no-op; restart it instead, unless it's still
+        // running (a oneshot service is `activating` until its command exits),
+        // since a restart would kill that run. A calendar job's service is
+        // only active while it's running, and `start` then leaves that run
+        // alone rather than overlapping it.
         let (_, timer_path) = self.paths(id);
         let verb = if path_exists(&timer_path) {
             "start"
         } else {
+            let state = run_checked(
+                self.context.runner.as_ref(),
+                "systemctl",
+                &[
+                    "--user",
+                    "show",
+                    "-p",
+                    "ActiveState",
+                    "--value",
+                    &self.service_unit(id),
+                ],
+            )?;
+            if state.stdout.trim() == "activating" {
+                return Ok(());
+            }
             "restart"
         };
         run_checked(
@@ -698,6 +715,38 @@ mod tests {
         enabled.store(false, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(driver.status("login").unwrap().state, JobState::Inactive);
         assert!(matches!(driver.run_now("login"), Err(Error::Disabled(_))));
+    }
+
+    #[test]
+    fn run_now_leaves_a_running_startup_job_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runner, calls) = crate::test_support::recording_runner(|_, args| {
+            if args.contains(&"ActiveState") {
+                return crate::process::ProcessOutput {
+                    code: 0,
+                    stdout: "activating\n".to_string(),
+                    stderr: String::new(),
+                };
+            }
+            crate::test_support::success()
+        });
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+        driver
+            .register(
+                &normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        driver.run_now("login").unwrap();
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains("restart")));
     }
 
     #[test]
