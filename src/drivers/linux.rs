@@ -413,12 +413,13 @@ impl Driver for LinuxDriver {
         let (_, timer_path) = self.paths(id);
         if path_exists(&timer_path) {
             // The timer's last trigger survives the service being unloaded
-            // and reboots (`Persistent=true`), so prefer it.
+            // and reboots (`Persistent=true`), but `run_now` starts the
+            // service without triggering the timer, so take the newer one.
             let timer = show(
                 &self.timer_unit(id),
                 &["LastTriggerUSec", "NextElapseUSecRealtime"],
             );
-            info.last_run = show_timestamp(&timer, "LastTriggerUSec").or(info.last_run);
+            info.last_run = info.last_run.max(show_timestamp(&timer, "LastTriggerUSec"));
             info.next_run = show_timestamp(&timer, "NextElapseUSecRealtime");
         }
         info
@@ -746,9 +747,37 @@ mod tests {
             .unwrap();
 
         let info = driver.run_info("daily");
+        // The timer's last trigger is newer than the service's last start.
         assert_eq!(info.last_run, unix_seconds(1_700_000_000));
         assert_eq!(info.last_exit_code, Some(2));
         assert_eq!(info.next_run, unix_seconds(1_700_086_400));
+    }
+
+    #[test]
+    fn reports_a_manual_run_newer_than_the_last_timer_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, args| {
+                let stdout = if args.contains(&"native-cron-daily.timer") {
+                    "LastTriggerUSec=@1700000000\n"
+                } else {
+                    "ExecMainStartTimestamp=@1700050000\n"
+                };
+                crate::process::ProcessOutput {
+                    code: 0,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                }
+            })),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+        assert_eq!(
+            driver.run_info("daily").last_run,
+            unix_seconds(1_700_050_000)
+        );
     }
 
     #[test]
