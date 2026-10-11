@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use systemd_unit_edit::{Section, SystemdUnit};
 
-use crate::driver::{ensure_runnable, Driver};
+use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{systemd_exec_quote, systemd_quote};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
@@ -68,6 +68,25 @@ fn calendar_lines(schedule: &CalendarSchedule) -> Vec<String> {
     } else {
         vec![format!("*-{month}-{day} {time}")]
     }
+}
+
+/// Reads `Key=value` from `systemctl show` output.
+fn show_value<'a>(show: &'a str, key: &str) -> Option<&'a str> {
+    show.lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "n/a")
+}
+
+/// Reads a `--timestamp=unix` value (`@1700000000`) from `systemctl show`
+/// output. Unset timestamps are empty, `n/a`, or `@0`.
+fn show_timestamp(show: &str, key: &str) -> Option<std::time::SystemTime> {
+    show_value(show, key)?
+        .strip_prefix('@')?
+        .parse::<i64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .and_then(unix_seconds)
 }
 
 /// Renders the `.service` unit for `job`.
@@ -347,6 +366,50 @@ impl Driver for LinuxDriver {
         Ok(())
     }
 
+    fn run_info(&self, id: &str) -> RunInfo {
+        let show = |unit: &str, properties: &[&str]| {
+            let mut args = vec!["--user", "show", "--timestamp=unix"];
+            for property in properties {
+                args.extend(["-p", property]);
+            }
+            args.push(unit);
+            match self.context.runner.run("systemctl", &args) {
+                Ok(output) if output.code == 0 => output.stdout,
+                _ => String::new(),
+            }
+        };
+
+        let service = show(
+            &Self::service_unit(id),
+            &[
+                "ExecMainStartTimestamp",
+                "ExecMainExitTimestamp",
+                "ExecMainStatus",
+            ],
+        );
+        let exited = show_timestamp(&service, "ExecMainExitTimestamp").is_some();
+        let mut info = RunInfo {
+            last_run: show_timestamp(&service, "ExecMainStartTimestamp"),
+            last_exit_code: show_value(&service, "ExecMainStatus")
+                .filter(|_| exited)
+                .and_then(|value| value.parse().ok()),
+            next_run: None,
+        };
+
+        let (_, timer_path) = self.paths(id);
+        if path_exists(&timer_path) {
+            // The timer's last trigger survives the service being unloaded
+            // and reboots (`Persistent=true`), so prefer it.
+            let timer = show(
+                &Self::timer_unit(id),
+                &["LastTriggerUSec", "NextElapseUSecRealtime"],
+            );
+            info.last_run = show_timestamp(&timer, "LastTriggerUSec").or(info.last_run);
+            info.next_run = show_timestamp(&timer, "NextElapseUSecRealtime");
+        }
+        info
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let (service_path, timer_path) = self.paths(id);
         let service_exists = path_exists(&service_path);
@@ -388,6 +451,9 @@ impl Driver for LinuxDriver {
             env: None,
             stdout: None,
             stderr: None,
+            last_run: None,
+            last_exit_code: None,
+            next_run: None,
         })
     }
 }
@@ -589,6 +655,52 @@ mod tests {
             driver.run_now("missing"),
             Err(Error::NotRegistered(_))
         ));
+    }
+
+    #[test]
+    fn reports_run_history_from_systemctl_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, args| {
+                let stdout = if args.contains(&"native-cron-daily.timer") {
+                    "LastTriggerUSec=@1700000000\nNextElapseUSecRealtime=@1700086400\n"
+                } else if args.contains(&"native-cron-daily.service") {
+                    "ExecMainStartTimestamp=@1699999999\nExecMainExitTimestamp=@1700000005\nExecMainStatus=2\n"
+                } else {
+                    ""
+                };
+                crate::process::ProcessOutput {
+                    code: 0,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                }
+            })),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+
+        let info = driver.run_info("daily");
+        assert_eq!(info.last_run, unix_seconds(1_700_000_000));
+        assert_eq!(info.last_exit_code, Some(2));
+        assert_eq!(info.next_run, unix_seconds(1_700_086_400));
+    }
+
+    #[test]
+    fn leaves_unreported_run_history_empty() {
+        let show = "ExecMainStartTimestamp=\nExecMainExitTimestamp=n/a\nExecMainStatus=0\nLastTriggerUSec=@0\n";
+        assert_eq!(show_timestamp(show, "ExecMainStartTimestamp"), None);
+        assert_eq!(show_timestamp(show, "ExecMainExitTimestamp"), None);
+        assert_eq!(show_timestamp(show, "LastTriggerUSec"), None);
+        assert_eq!(show_value(show, "ExecMainStatus"), Some("0"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, _| crate::test_support::exit_code(1))),
+        });
+        assert_eq!(driver.run_info("daily"), RunInfo::default());
     }
 
     #[test]

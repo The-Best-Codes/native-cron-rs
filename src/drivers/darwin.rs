@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use plist::{Dictionary, Value};
 
-use crate::driver::{ensure_runnable, Driver};
+use crate::driver::{ensure_runnable, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
 use crate::normalize::NormalizedJob;
@@ -136,6 +136,15 @@ fn calendar_entries(schedule: &CalendarSchedule) -> Vec<CalendarEntry> {
             entry.weekday = Some(value)
         })
     }
+}
+
+/// Reads `last exit code = N` from `launchctl print` output. launchd prints
+/// `(never exited)` instead of a number before the first run finishes.
+fn parse_last_exit_code(print: &str) -> Option<i32> {
+    print
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("last exit code = "))
+        .and_then(|value| value.split(':').next()?.trim().parse().ok())
 }
 
 /// Renders the launchd agent plist for `job`.
@@ -319,6 +328,17 @@ impl Driver for DarwinDriver {
         Ok(())
     }
 
+    fn run_info(&self, id: &str) -> RunInfo {
+        let service = self.service(id);
+        match self.context.runner.run("launchctl", &["print", &service]) {
+            Ok(output) if output.code == 0 => RunInfo {
+                last_exit_code: parse_last_exit_code(&output.stdout),
+                ..RunInfo::default()
+            },
+            _ => RunInfo::default(),
+        }
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let path = self.path(id);
         let exists = path_exists(&path);
@@ -351,6 +371,9 @@ impl Driver for DarwinDriver {
             env: None,
             stdout: None,
             stderr: None,
+            last_run: None,
+            last_exit_code: None,
+            next_run: None,
         })
     }
 }
@@ -482,6 +505,21 @@ mod tests {
             driver.run_now("missing"),
             Err(Error::NotRegistered(_))
         ));
+    }
+
+    #[test]
+    fn reads_the_last_exit_code_from_launchctl_print() {
+        let print = "gui/501/native-cron.backup = {\n\tstate = not running\n\truns = 2\n\tlast exit code = 3\n}";
+        assert_eq!(parse_last_exit_code(print), Some(3));
+        assert_eq!(
+            parse_last_exit_code("\tlast exit code = (never exited)\n"),
+            None
+        );
+        assert_eq!(parse_last_exit_code(""), None);
+        assert_eq!(
+            parse_last_exit_code("\tlast exit code = 78: Function not implemented\n"),
+            Some(78)
+        );
     }
 
     #[test]

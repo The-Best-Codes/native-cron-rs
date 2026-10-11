@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 /// The operating system a driver targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -242,6 +243,16 @@ pub struct JobStatus {
     pub stdout: Option<PathBuf>,
     /// Standard error path, if this handle knows its configuration.
     pub stderr: Option<PathBuf>,
+    /// When the job last started, if the native scheduler reports it.
+    /// Always `None` on macOS, where launchd doesn't record it.
+    pub last_run: Option<SystemTime>,
+    /// The exit code of the last finished run, if the native scheduler
+    /// reports it.
+    pub last_exit_code: Option<i32>,
+    /// When the job will next run, if the native scheduler reports it.
+    /// `None` for disabled and startup jobs, and always `None` on macOS,
+    /// where launchd doesn't expose it.
+    pub next_run: Option<SystemTime>,
 }
 
 #[cfg(test)]

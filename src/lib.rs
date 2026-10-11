@@ -101,6 +101,12 @@ impl Job {
     /// configuration this handle was registered with (if any).
     pub fn status(&self) -> Result<JobStatus> {
         let mut status = self.driver.status(&self.id)?;
+        if status.state != JobState::Missing {
+            let info = self.driver.run_info(&self.id);
+            status.last_run = info.last_run;
+            status.last_exit_code = info.last_exit_code;
+            status.next_run = info.next_run;
+        }
         if let Some(normalized) = &self.normalized {
             status.cron = match &normalized.schedule {
                 schedule::Schedule::Calendar(calendar) => Some(calendar.normalized.clone()),

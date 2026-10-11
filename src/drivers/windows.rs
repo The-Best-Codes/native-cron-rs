@@ -5,7 +5,7 @@ use chrono::Local;
 use quick_xml::events::{BytesDecl, BytesText, Event};
 use quick_xml::writer::Writer;
 
-use crate::driver::{ensure_runnable, Driver};
+use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{powershell_quote, windows_argument};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
@@ -95,6 +95,42 @@ fn start_boundary(hour: u32, minute: u32) -> String {
 /// output redirection) that needs the wrapper anyway.
 fn runs_directly(job: &NormalizedJob) -> bool {
     job.windows.visible && job.env.is_empty() && job.stdout.is_none() && job.stderr.is_none()
+}
+
+/// `LastTaskResult` values that are Task Scheduler states rather than an exit
+/// code: ready, currently running, and has not run yet.
+const TASK_STATE_RESULTS: [i64; 3] = [0x41300, 0x41301, 0x41303];
+
+/// Renders a PowerShell command that prints a task's run history as
+/// `Key=value` lines, with times as Unix seconds. Task Scheduler reports a
+/// never-run task's last run time as 1999-11-30, so pre-2000 times are left
+/// empty.
+fn render_task_info_script(task: &str) -> String {
+    format!(
+        "$i = Get-ScheduledTaskInfo -TaskName {} -ErrorAction Stop\n\
+         function T($d) {{ if ($d -and $d.Year -ge 2000) {{ [DateTimeOffset]::new($d).ToUnixTimeSeconds() }} }}\n\
+         \"LastRunTime=$(T $i.LastRunTime)\"\n\
+         \"LastTaskResult=$($i.LastTaskResult)\"\n\
+         \"NextRunTime=$(T $i.NextRunTime)\"",
+        powershell_quote(task)
+    )
+}
+
+fn parse_task_info(output: &str) -> RunInfo {
+    let value = |key: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(key)?.strip_prefix('='))
+            .and_then(|value| value.trim().parse::<i64>().ok())
+    };
+    RunInfo {
+        last_run: value("LastRunTime").and_then(unix_seconds),
+        // Exit codes are reported as unsigned 32-bit values.
+        last_exit_code: value("LastTaskResult")
+            .filter(|result| !TASK_STATE_RESULTS.contains(result))
+            .map(|result| result as u32 as i32),
+        next_run: value("NextRunTime").and_then(unix_seconds),
+    }
 }
 
 /// Renders the PowerShell wrapper script that Task Scheduler invokes.
@@ -677,6 +713,23 @@ impl Driver for WindowsDriver {
         Ok(())
     }
 
+    fn run_info(&self, id: &str) -> RunInfo {
+        let script = render_task_info_script(&Self::task_name(id));
+        match self.context.runner.run(
+            "powershell.exe",
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ],
+        ) {
+            Ok(output) if output.code == 0 => parse_task_info(&output.stdout),
+            _ => RunInfo::default(),
+        }
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let (xml_path, script_path) = self.paths(id);
         let result = self.query(id)?;
@@ -694,6 +747,9 @@ impl Driver for WindowsDriver {
                     env: None,
                     stdout: None,
                     stderr: None,
+                    last_run: None,
+                    last_exit_code: None,
+                    next_run: None,
                 });
             }
             return Err(Error::CommandFailed {
@@ -722,6 +778,9 @@ impl Driver for WindowsDriver {
             env: None,
             stdout: None,
             stderr: None,
+            last_run: None,
+            last_exit_code: None,
+            next_run: None,
         })
     }
 }
@@ -1010,6 +1069,22 @@ mod tests {
             driver.run_now("missing"),
             Err(Error::NotRegistered(_))
         ));
+    }
+
+    #[test]
+    fn reports_run_history_from_get_scheduled_task_info() {
+        let info = parse_task_info(
+            "LastRunTime=1700000000\r\nLastTaskResult=2147942402\r\nNextRunTime=1700086400\r\n",
+        );
+        assert_eq!(info.last_run, unix_seconds(1_700_000_000));
+        assert_eq!(info.last_exit_code, Some(0x8007_0002u32 as i32));
+        assert_eq!(info.next_run, unix_seconds(1_700_086_400));
+
+        let never_ran = parse_task_info("LastRunTime=\nLastTaskResult=267011\nNextRunTime=\n");
+        assert_eq!(never_ran, RunInfo::default());
+
+        let script = render_task_info_script("native-cron-backup");
+        assert!(script.contains("Get-ScheduledTaskInfo -TaskName 'native-cron-backup'"));
     }
 
     #[test]

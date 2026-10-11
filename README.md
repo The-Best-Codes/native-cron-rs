@@ -165,10 +165,21 @@ pub struct JobStatus {
     pub env: Option<HashMap<String, String>>,
     pub stdout: Option<PathBuf>,
     pub stderr: Option<PathBuf>,
+    pub last_run: Option<SystemTime>,
+    pub last_exit_code: Option<i32>,
+    pub next_run: Option<SystemTime>,
 }
 ```
 
 `Active` means registered and enabled, `Inactive` means registered but disabled, and `Missing` means not registered.
+
+`last_run`, `last_exit_code`, and `next_run` come from the native scheduler, for any handle, and are `None` when it doesn't report them:
+
+| Field            | macOS                       | Linux                                      | Windows                     |
+| ---------------- | --------------------------- | ------------------------------------------ | --------------------------- |
+| `last_run`       | not reported by launchd     | timer's last trigger (or service start)    | `Get-ScheduledTaskInfo`     |
+| `last_exit_code` | `launchctl print`           | service's main process exit status         | `Get-ScheduledTaskInfo`     |
+| `next_run`       | not reported by launchd     | timer's next elapse                        | `Get-ScheduledTaskInfo`     |
 
 ### `validate`
 
