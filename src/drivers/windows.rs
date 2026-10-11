@@ -5,11 +5,11 @@ use chrono::Local;
 use quick_xml::events::{BytesDecl, BytesText, Event};
 use quick_xml::writer::Writer;
 
-use crate::driver::Driver;
+use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{powershell_quote, windows_argument};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
-use crate::normalize::NormalizedJob;
+use crate::normalize::{qualified_name, NormalizedJob, DEFAULT_NAMESPACE};
 use crate::process::{CommandRunner, ProcessOutput};
 use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
@@ -47,6 +47,7 @@ pub struct WindowsContext {
 
 pub struct WindowsDriver {
     context: WindowsContext,
+    namespace: String,
 }
 
 fn utf16le_with_bom(value: &str) -> Vec<u8> {
@@ -87,6 +88,59 @@ fn start_boundary(hour: u32, minute: u32) -> String {
     let date_str = "1970-01-01".to_string();
 
     format!("{date_str}T{hour:02}:{minute:02}:00")
+}
+
+/// Whether Task Scheduler can run the command itself instead of going through
+/// the PowerShell wrapper. Only done for visible jobs: the wrapper's console
+/// would show up in the user's session, and there is nothing (env vars or
+/// output redirection) that needs the wrapper anyway. The command also has to
+/// be an `.exe`; anything else (`.ps1`, `.bat`, a file opened through its
+/// association) still needs PowerShell's `&` to start it.
+fn runs_directly(job: &NormalizedJob) -> bool {
+    let is_exe = std::path::Path::new(&job.command[0])
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+    is_exe
+        && job.windows.visible
+        && job.env.is_empty()
+        && job.stdout.is_none()
+        && job.stderr.is_none()
+}
+
+/// `LastTaskResult` values that are Task Scheduler states rather than an exit
+/// code: ready, currently running, and has not run yet.
+const TASK_STATE_RESULTS: [i64; 3] = [0x41300, 0x41301, 0x41303];
+
+/// Renders a PowerShell command that prints a task's run history as
+/// `Key=value` lines, with times as Unix seconds. Task Scheduler reports a
+/// never-run task's last run time as 1999-11-30, so pre-2000 times are left
+/// empty.
+fn render_task_info_script(task: &str) -> String {
+    format!(
+        "$i = Get-ScheduledTaskInfo -TaskName {} -ErrorAction Stop\n\
+         function T($d) {{ if ($d -and $d.Year -ge 2000) {{ [DateTimeOffset]::new($d).ToUnixTimeSeconds() }} }}\n\
+         \"LastRunTime=$(T $i.LastRunTime)\"\n\
+         \"LastTaskResult=$($i.LastTaskResult)\"\n\
+         \"NextRunTime=$(T $i.NextRunTime)\"",
+        powershell_quote(task)
+    )
+}
+
+fn parse_task_info(output: &str) -> RunInfo {
+    let value = |key: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(key)?.strip_prefix('='))
+            .and_then(|value| value.trim().parse::<i64>().ok())
+    };
+    RunInfo {
+        last_run: value("LastRunTime").and_then(unix_seconds),
+        // Exit codes are reported as unsigned 32-bit values.
+        last_exit_code: value("LastTaskResult")
+            .filter(|result| !TASK_STATE_RESULTS.contains(result))
+            .map(|result| result as u32 as i32),
+        next_run: value("NextRunTime").and_then(unix_seconds),
+    }
 }
 
 /// Renders the PowerShell wrapper script that Task Scheduler invokes.
@@ -361,19 +415,24 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
 
 /// Renders the Task Scheduler XML task definition for `job`.
 pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String> {
-    let arguments = [
-        "-NoLogo",
-        "-NonInteractive",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        script_path,
-    ]
-    .iter()
-    .map(|arg| windows_argument(arg))
-    .collect::<Vec<_>>()
-    .join(" ");
+    let (program, arguments) = if runs_directly(job) {
+        (job.command[0].as_str(), job.command[1..].to_vec())
+    } else {
+        let mut arguments = vec!["-NoLogo", "-NonInteractive", "-NoProfile"];
+        if job.windows.visible {
+            arguments.extend(["-WindowStyle", "Hidden"]);
+        }
+        arguments.extend(["-ExecutionPolicy", "Bypass", "-File", script_path]);
+        (
+            "powershell.exe",
+            arguments.into_iter().map(str::to_string).collect(),
+        )
+    };
+    let arguments = arguments
+        .iter()
+        .map(|arg| windows_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let mut writer = Writer::new(Vec::new());
 
@@ -466,10 +525,12 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String>
     writer.write_event(Event::Start(quick_xml::events::BytesStart::new("Exec")))?;
     writer
         .create_element("Command")
-        .write_text_content(BytesText::new("powershell.exe"))?;
-    writer
-        .create_element("Arguments")
-        .write_text_content(BytesText::new(&arguments))?;
+        .write_text_content(BytesText::new(program))?;
+    if !arguments.is_empty() {
+        writer
+            .create_element("Arguments")
+            .write_text_content(BytesText::new(&arguments))?;
+    }
     if let Some(cwd) = &job.cwd {
         writer
             .create_element("WorkingDirectory")
@@ -484,19 +545,36 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String>
 }
 
 impl WindowsDriver {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(context: WindowsContext) -> Self {
-        Self { context }
+        Self::with_namespace(context, DEFAULT_NAMESPACE)
+    }
+
+    /// Creates a driver whose native names start with `namespace` instead of
+    /// [`DEFAULT_NAMESPACE`].
+    pub fn with_namespace(context: WindowsContext, namespace: impl Into<String>) -> Self {
+        Self {
+            context,
+            namespace: namespace.into(),
+        }
     }
 
     fn paths(&self, id: &str) -> (PathBuf, PathBuf) {
+        // Jobs in the default namespace keep their files directly in the
+        // root, where they were before namespaces existed.
+        let directory = if self.namespace == DEFAULT_NAMESPACE {
+            self.context.root.clone()
+        } else {
+            self.context.root.join(&self.namespace)
+        };
         (
-            self.context.root.join(format!("{id}.xml")),
-            self.context.root.join(format!("{id}.ps1")),
+            directory.join(format!("{id}.xml")),
+            directory.join(format!("{id}.ps1")),
         )
     }
 
-    fn task_name(id: &str) -> String {
-        format!("native-cron-{id}")
+    fn task_name(&self, id: &str) -> String {
+        qualified_name(&self.namespace, id)
     }
 
     fn is_startup(&self, id: &str) -> bool {
@@ -511,7 +589,7 @@ impl WindowsDriver {
     }
 
     fn query(&self, id: &str) -> Result<ProcessOutput> {
-        let task = Self::task_name(id);
+        let task = self.task_name(id);
         self.context.runner.run(
             "schtasks.exe",
             &["/query", "/tn", &task, "/xml", "/hresult"],
@@ -522,7 +600,9 @@ impl WindowsDriver {
 impl Driver for WindowsDriver {
     fn preflight(&self, job: &NormalizedJob) -> Result<()> {
         let (_, script_path) = self.paths(&job.id);
-        render_powershell_wrapper(job);
+        if !runs_directly(job) {
+            render_powershell_wrapper(job);
+        }
         render_task_xml(job, &script_path.to_string_lossy())?;
         Ok(())
     }
@@ -541,12 +621,18 @@ impl Driver for WindowsDriver {
         let previous_script = std::fs::read(&script_path).ok();
 
         let write_result = (|| -> Result<()> {
-            let script = render_powershell_wrapper(job);
-            atomic_write(&script_path, &utf16le_with_bom(&script))?;
+            if runs_directly(job) {
+                if path_exists(&script_path) {
+                    std::fs::remove_file(&script_path)?;
+                }
+            } else {
+                let script = render_powershell_wrapper(job);
+                atomic_write(&script_path, &utf16le_with_bom(&script))?;
+            }
             let xml = render_task_xml(job, &script_path.to_string_lossy())?;
             atomic_write(&xml_path, &utf16le_with_bom(&xml))?;
 
-            let task = Self::task_name(&job.id);
+            let task = self.task_name(&job.id);
             let xml_str = xml_path.to_string_lossy();
             // `/it` (InteractiveToken) and `/np` (S4U) select the same logon
             // type as the `<LogonType>` written into the XML above. Task
@@ -583,7 +669,7 @@ impl Driver for WindowsDriver {
         }
 
         if matches!(job.schedule, Schedule::Startup) {
-            let task = Self::task_name(&job.id);
+            let task = self.task_name(&job.id);
             run_checked_owned(
                 self.context.runner.as_ref(),
                 "schtasks.exe",
@@ -597,7 +683,7 @@ impl Driver for WindowsDriver {
         if self.status(id)?.state == JobState::Missing {
             return Err(Error::NotRegistered(id.to_string()));
         }
-        let task = Self::task_name(id);
+        let task = self.task_name(id);
         run_checked_owned(
             self.context.runner.as_ref(),
             "schtasks.exe",
@@ -615,7 +701,7 @@ impl Driver for WindowsDriver {
 
     fn disable(&self, id: &str) -> Result<()> {
         if self.status(id)?.state != JobState::Missing {
-            let task = Self::task_name(id);
+            let task = self.task_name(id);
             run_checked_owned(
                 self.context.runner.as_ref(),
                 "schtasks.exe",
@@ -628,7 +714,7 @@ impl Driver for WindowsDriver {
     fn remove(&self, id: &str) -> Result<()> {
         let (xml_path, script_path) = self.paths(id);
         if self.status(id)?.state != JobState::Missing {
-            let task = Self::task_name(id);
+            let task = self.task_name(id);
             run_checked_owned(
                 self.context.runner.as_ref(),
                 "schtasks.exe",
@@ -641,6 +727,34 @@ impl Driver for WindowsDriver {
             }
         }
         Ok(())
+    }
+
+    fn run_now(&self, id: &str) -> Result<()> {
+        ensure_runnable(&self.status(id)?)?;
+        let task = self.task_name(id);
+        run_checked_owned(
+            self.context.runner.as_ref(),
+            "schtasks.exe",
+            vec!["/run", "/tn", &task],
+        )?;
+        Ok(())
+    }
+
+    fn run_info(&self, id: &str) -> RunInfo {
+        let script = render_task_info_script(&self.task_name(id));
+        match self.context.runner.run(
+            "powershell.exe",
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ],
+        ) {
+            Ok(output) if output.code == 0 => parse_task_info(&output.stdout),
+            _ => RunInfo::default(),
+        }
     }
 
     fn status(&self, id: &str) -> Result<JobStatus> {
@@ -660,10 +774,13 @@ impl Driver for WindowsDriver {
                     env: None,
                     stdout: None,
                     stderr: None,
+                    last_run: None,
+                    last_exit_code: None,
+                    next_run: None,
                 });
             }
             return Err(Error::CommandFailed {
-                command: format!("schtasks.exe /query /tn native-cron-{id}"),
+                command: format!("schtasks.exe /query /tn {}", self.task_name(id)),
                 detail: result.stderr,
             });
         }
@@ -688,6 +805,9 @@ impl Driver for WindowsDriver {
             env: None,
             stdout: None,
             stderr: None,
+            last_run: None,
+            last_exit_code: None,
+            next_run: None,
         })
     }
 }
@@ -753,6 +873,43 @@ mod tests {
         let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<LogonType>S4U</LogonType>"));
+    }
+
+    #[test]
+    fn runs_visible_jobs_directly_without_a_powershell_console() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = normalize(
+            CronOptions::new(
+                "backup",
+                "0 9 * * *",
+                [test_executable(), "agent-one://cron?v=1&id=x".to_string()],
+            )
+            .cwd(dir.path())
+            .windows(crate::types::WindowsOptions { visible: true }),
+        )
+        .unwrap();
+        // Normalization resolves the real test binary; swap in Windows paths.
+        job.command[0] = "C:\\Windows\\System32\\rundll32.EXE".to_string();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains("<Command>C:\\Windows\\System32\\rundll32.EXE</Command>"));
+        assert!(xml.contains("<Arguments>agent-one://cron?v=1&amp;id=x</Arguments>"));
+        assert!(!xml.contains("powershell.exe"));
+
+        job.command[0] = "C:\\Scripts\\job.ps1".to_string();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains("<Command>powershell.exe</Command>"));
+
+        let wrapped = normalize(
+            options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),
+        )
+        .unwrap();
+        let xml = render_task_xml(&wrapped, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(xml.contains("<Command>powershell.exe</Command>"));
+        assert!(xml.contains("-WindowStyle Hidden"));
+
+        let hidden = normalize(options("backup", dir.path())).unwrap();
+        let xml = render_task_xml(&hidden, "C:\\native-cron\\backup.ps1").unwrap();
+        assert!(!xml.contains("-WindowStyle"));
     }
 
     #[test]
@@ -891,6 +1048,119 @@ mod tests {
         let args = seen_args.lock().unwrap();
         assert!(args.iter().any(|arg| arg == "/it"));
         assert!(!args.iter().any(|arg| arg == "/np"));
+    }
+
+    #[test]
+    fn disabling_an_unregistered_job_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = WindowsDriver::new(WindowsContext {
+            root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, _| ProcessOutput {
+                code: 0x8007_0002u32 as i32,
+                stdout: String::new(),
+                stderr: "Task not found".to_string(),
+            })),
+        });
+        driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
+    fn run_now_runs_enabled_tasks_and_rejects_disabled_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let enabled_clone = enabled.clone();
+        let (runner, calls) = crate::test_support::recording_runner(move |_, args| {
+            if args.first() == Some(&"/query") && args.contains(&"native-cron-missing") {
+                return crate::test_support::exit_code(0x8007_0002u32 as i32);
+            }
+            if args.first() == Some(&"/query") {
+                return ProcessOutput {
+                    code: 0,
+                    stdout: format!(
+                        "<Task><Settings><Enabled>{}</Enabled></Settings></Task>",
+                        enabled_clone.load(std::sync::atomic::Ordering::SeqCst)
+                    ),
+                    stderr: String::new(),
+                };
+            }
+            crate::test_support::success()
+        });
+        let driver = WindowsDriver::new(WindowsContext {
+            root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+
+        driver.run_now("backup").unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .contains(&"schtasks.exe /run /tn native-cron-backup".to_string()));
+
+        enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(driver.run_now("backup"), Err(Error::Disabled(_))));
+        assert!(matches!(
+            driver.run_now("missing"),
+            Err(Error::NotRegistered(_))
+        ));
+    }
+
+    #[test]
+    fn reports_run_history_from_get_scheduled_task_info() {
+        let info = parse_task_info(
+            "LastRunTime=1700000000\r\nLastTaskResult=2147942402\r\nNextRunTime=1700086400\r\n",
+        );
+        assert_eq!(info.last_run, unix_seconds(1_700_000_000));
+        assert_eq!(info.last_exit_code, Some(0x8007_0002u32 as i32));
+        assert_eq!(info.next_run, unix_seconds(1_700_086_400));
+
+        let never_ran = parse_task_info("LastRunTime=\nLastTaskResult=267011\nNextRunTime=\n");
+        assert_eq!(never_ran, RunInfo::default());
+
+        let script = render_task_info_script("native-cron-backup");
+        assert!(script.contains("Get-ScheduledTaskInfo -TaskName 'native-cron-backup'"));
+    }
+
+    #[test]
+    fn namespaces_task_names_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runner, calls) = crate::test_support::recording_runner(|_, args| {
+            if args.first() == Some(&"/query") {
+                return crate::test_support::exit_code(0x8007_0002u32 as i32);
+            }
+            crate::test_support::success()
+        });
+        let driver = WindowsDriver::with_namespace(
+            WindowsContext {
+                root: dir.path().to_path_buf(),
+                runner: Box::new(runner),
+            },
+            "dev.agent-one",
+        );
+        let job = normalize(options("backup", dir.path()).namespace("dev.agent-one")).unwrap();
+        driver.register(&job).unwrap();
+
+        let status = driver.status("backup").unwrap();
+        assert_eq!(
+            status.config_paths[0],
+            dir.path().join("dev.agent-one").join("backup.xml")
+        );
+        assert_eq!(
+            status.config_paths[1],
+            dir.path().join("dev.agent-one").join("backup.ps1")
+        );
+        assert!(status.config_paths.iter().all(|path| path.exists()));
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("schtasks.exe /create")
+                && call.contains("/tn dev.agent-one.backup")));
+
+        let default = WindowsDriver::new(WindowsContext {
+            root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::always_success()),
+        });
+        assert_eq!(default.paths("backup").0, dir.path().join("backup.xml"));
     }
 
     #[test]

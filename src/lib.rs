@@ -43,9 +43,10 @@ mod test_support;
 mod types;
 
 pub use error::{Error, Result};
+pub use normalize::DEFAULT_NAMESPACE;
 pub use process::{CommandRunner, ProcessOutput};
 pub use schedule::{CalendarSchedule, CronField, Schedule};
-pub use types::{CronOptions, JobState, JobStatus, Platform, WindowsOptions};
+pub use types::{CronOptions, JobState, JobStatus, MacOSOptions, Platform, WindowsOptions};
 
 use std::sync::Arc;
 
@@ -76,7 +77,8 @@ impl Job {
         self.driver.enable(&self.id)
     }
 
-    /// Disables the job while preserving its native configuration.
+    /// Disables the job while preserving its native configuration. Does
+    /// nothing if the job is not registered.
     pub fn disable(&self) -> Result<()> {
         self.driver.disable(&self.id)
     }
@@ -86,10 +88,26 @@ impl Job {
         self.driver.remove(&self.id)
     }
 
+    /// Runs the job once right away through the native scheduler, the same
+    /// way a scheduled run would start, without changing its schedule. If a
+    /// run is already in progress, no second one is started.
+    ///
+    /// Returns [`Error::NotRegistered`] if the job is not registered and
+    /// [`Error::Disabled`] if it is disabled.
+    pub fn run_now(&self) -> Result<()> {
+        self.driver.run_now(&self.id)
+    }
+
     /// Reports the job's current native state, enriched with the
     /// configuration this handle was registered with (if any).
     pub fn status(&self) -> Result<JobStatus> {
         let mut status = self.driver.status(&self.id)?;
+        if status.state != JobState::Missing {
+            let info = self.driver.run_info(&self.id);
+            status.last_run = info.last_run;
+            status.last_exit_code = info.last_exit_code;
+            status.next_run = info.next_run;
+        }
         if let Some(normalized) = &self.normalized {
             status.cron = match &normalized.schedule {
                 schedule::Schedule::Calendar(calendar) => Some(calendar.normalized.clone()),
@@ -123,8 +141,8 @@ impl Job {
 /// at registration time (or the explicit `cwd`, if supplied). Output
 /// directories are created automatically.
 pub fn register(options: CronOptions) -> Result<Job> {
-    let driver = runtime::driver()?;
     let normalized = normalize(options)?;
+    let driver = runtime::driver(&normalized.namespace)?;
     driver.register(&normalized)?;
     Ok(Job {
         driver,
@@ -140,9 +158,15 @@ pub fn register(options: CronOptions) -> Result<Job> {
 /// those fields. Use [`register`] with `overwrite: true` if you need to
 /// inspect or change the configuration.
 pub fn job(id: impl Into<String>) -> Result<Job> {
+    job_in(DEFAULT_NAMESPACE, id)
+}
+
+/// Like [`job`], for a job registered with [`CronOptions::namespace`].
+pub fn job_in(namespace: impl AsRef<str>, id: impl Into<String>) -> Result<Job> {
     let id = id.into();
+    normalize::validate_namespace(namespace.as_ref())?;
     normalize::validate_id(&id)?;
-    let driver = runtime::driver()?;
+    let driver = runtime::driver(namespace.as_ref())?;
     Ok(Job {
         driver,
         id,
@@ -152,16 +176,22 @@ pub fn job(id: impl Into<String>) -> Result<Job> {
 
 /// Removes a job by id without needing a [`Job`] handle first. Idempotent.
 pub fn remove(id: impl AsRef<str>) -> Result<()> {
+    remove_in(DEFAULT_NAMESPACE, id)
+}
+
+/// Like [`remove`], for a job registered with [`CronOptions::namespace`].
+pub fn remove_in(namespace: impl AsRef<str>, id: impl AsRef<str>) -> Result<()> {
     let id = id.as_ref();
+    normalize::validate_namespace(namespace.as_ref())?;
     normalize::validate_id(id)?;
-    runtime::driver()?.remove(id)
+    runtime::driver(namespace.as_ref())?.remove(id)
 }
 
 /// Validates that `options` can be registered, without writing any native
 /// configuration or calling any native command. Useful for fast-failing a
 /// batch of registrations before committing to any of them.
 pub fn validate(options: CronOptions) -> Result<()> {
-    let driver = runtime::driver()?;
     let normalized = normalize(options)?;
+    let driver = runtime::driver(&normalized.namespace)?;
     driver.preflight(&normalized)
 }

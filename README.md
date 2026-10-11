@@ -60,7 +60,7 @@ let job = native_cron::register(CronOptions::new(
 
 | Field            | Type                              | Required   | Meaning                                                                                                                           |
 | ---------------- | --------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `id`             | `String`                          | yes        | Unique name, 1 to 100 characters of letters, numbers, hyphens, and underscores. Unique within `native-cron` on that user account. |
+| `id`             | `String`                          | yes        | Unique name, 1 to 100 characters of letters, numbers, hyphens, and underscores. Unique within its namespace on that user account.     |
 | `command`        | `Vec<String>`                     | yes        | First element is the executable, the rest are its arguments. Must be non-empty.                                                   |
 | `cron`           | `Option<String>`                  | one of two | Five-field expression or nickname. Mutually exclusive with `run_at_startup`.                                                      |
 | `run_at_startup` | `bool`                            | one of two | Run at user-session start instead of on a schedule. Mutually exclusive with `cron`.                                               |
@@ -69,6 +69,9 @@ let job = native_cron::register(CronOptions::new(
 | `stdout`         | `Option<PathBuf>`                 | no         | File to append standard output to.                                                                                                |
 | `stderr`         | `Option<PathBuf>`                 | no         | File to append standard error to.                                                                                                 |
 | `overwrite`      | `bool`                            | no         | Replace an existing job with the same id instead of failing.                                                                      |
+| `namespace`      | `Option<String>`                  | no         | Prefix for the job's native names, default `native-cron`. Ids only need to be unique within a namespace.                          |
+| `macos`          | `MacOSOptions`                    | no         | macOS-only settings, see [macOS](#macos).                                                                                         |
+| `windows`        | `WindowsOptions`                  | no         | Windows-only settings, see [Windows](#windows).                                                                                   |
 
 Everything optional is written into the native configuration only when you supply it. Nothing is defaulted for you.
 
@@ -95,7 +98,42 @@ use native_cron::CronOptions;
 let job = native_cron::register(CronOptions::at_startup("agent", ["/usr/local/bin/agent"]))?;
 ```
 
+A job that opens a URL (a web page, a file, or your app's own deep link) in the user's session uses `open_url`. It picks a command per platform that doesn't flash a console window and doesn't kill the opened app when the job finishes:
+
+```rust
+use native_cron::CronOptions;
+
+let job = native_cron::register(CronOptions::open_url(
+    "morning-briefing",
+    "0 7 * * 1-5",
+    "my-app://run?task=briefing",
+))?;
+```
+
+| Platform | Command                                                         |
+| -------- | --------------------------------------------------------------- |
+| macOS    | `/usr/bin/open <url>`                                           |
+| Linux    | `systemd-run --user --scope --quiet -- xdg-open <url>`          |
+| Windows  | `rundll32.exe url.dll,FileProtocolHandler <url>`, `visible: true` |
+
 `@reboot` and `@login` are accepted as schedule strings and mean the same thing, but `at_startup` is the preferred spelling.
+
+#### Namespaces
+
+Every app using `native-cron` shares the default `native-cron` namespace, so two apps that both register a `backup` job would replace each other's. Give your jobs their own namespace, ideally your app's reverse-DNS identifier, and pass the same namespace when you look them up later:
+
+```rust
+use native_cron::CronOptions;
+
+native_cron::register(
+    CronOptions::new("backup", "0 2 * * *", ["/usr/local/bin/backup"]).namespace("com.example.app"),
+)?;
+
+let job = native_cron::job_in("com.example.app", "backup")?;
+native_cron::remove_in("com.example.app", "backup")?;
+```
+
+A namespace is 1 to 100 letters, numbers, dots, hyphens, and underscores, starting and ending with a letter or number. Windows device names such as `CON`, `NUL`, or `COM1` (also with a suffix, like `com1.app`) are rejected on every platform. Changing a job's namespace registers a new job; remove the old one with `remove_in` (or `remove` for the default namespace).
 
 Registering an `id` that already exists returns `Error::AlreadyExists` unless `overwrite(true)` is set, in which case the existing schedule and command are replaced and the job is restarted.
 
@@ -113,10 +151,13 @@ The `Job` returned by `register` operates on the persistent native job:
 
 ```rust
 job.enable()?; // load and start again
-job.disable()?; // disable/unload, keeping the configuration
+job.disable()?; // disable/unload, keeping the configuration; no-op if not registered
 job.remove()?; // unregister and delete configuration, idempotent
 job.status()?; // report current native state
+job.run_now()?; // start one run right away, without changing the schedule
 ```
+
+`run_now` starts the job through the native scheduler (`launchctl kickstart`, `systemctl --user start`, `schtasks /run`), so it runs with the same environment as a scheduled run. It returns `Error::NotRegistered` for a missing job and `Error::Disabled` for a disabled one, and doesn't start a second run while one is in progress.
 
 A handle to a job registered by another process can be fetched by id with `native_cron::job`, and a job can be removed outright with `native_cron::remove`:
 
@@ -144,10 +185,21 @@ pub struct JobStatus {
     pub env: Option<HashMap<String, String>>,
     pub stdout: Option<PathBuf>,
     pub stderr: Option<PathBuf>,
+    pub last_run: Option<SystemTime>,
+    pub last_exit_code: Option<i32>,
+    pub next_run: Option<SystemTime>,
 }
 ```
 
 `Active` means registered and enabled, `Inactive` means registered but disabled, and `Missing` means not registered.
+
+`last_run`, `last_exit_code`, and `next_run` come from the native scheduler, for any handle, and are `None` when it doesn't report them:
+
+| Field            | macOS                       | Linux                                      | Windows                     |
+| ---------------- | --------------------------- | ------------------------------------------ | --------------------------- |
+| `last_run`       | not reported by launchd     | newer of timer trigger and service start   | `Get-ScheduledTaskInfo`     |
+| `last_exit_code` | `launchctl print`           | service's main process exit status         | `Get-ScheduledTaskInfo`     |
+| `next_run`       | not reported by launchd     | timer's next elapse                        | `Get-ScheduledTaskInfo`     |
 
 ### `validate`
 
@@ -200,6 +252,7 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 
 | Variant                             | When                                                                                                            |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `InvalidNamespace`                  | The namespace is empty, over 100 characters, uses disallowed characters, or doesn't start and end with a letter or number. |
 | `InvalidId`                         | The id is empty, over 100 characters, or uses characters other than letters, numbers, hyphens, and underscores. |
 | `InvalidCronExpression(String)`     | The schedule does not parse. The string says what was wrong.                                                    |
 | `EmptyCommand`                      | The command list is empty.                                                                                      |
@@ -212,7 +265,8 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 | `AmbiguousTrigger`                  | Both `cron` and `run_at_startup` are set.                                                                       |
 | `MissingTrigger`                    | Neither `cron` nor `run_at_startup` is set.                                                                     |
 | `AlreadyExists(String)`             | The id is registered and `overwrite` was not set.                                                               |
-| `NotRegistered(String)`             | `enable` or `disable` was called on an id that is not registered.                                               |
+| `NotRegistered(String)`             | `enable` was called on an id that is not registered.                                                            |
+| `Disabled(String)`                  | `run_now` was called on a job that is registered but disabled.                                                  |
 | `TooManyIntervals(usize)`           | The expression expands to more than 10,000 launchd calendar entries.                                            |
 | `TooManyWindowsTriggers(usize)`     | The expression needs more than 48 Task Scheduler triggers.                                                      |
 | `UnsupportedPlatform`               | The operating system is not macOS, Linux, or Windows.                                                           |
@@ -224,9 +278,11 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 
 | Platform | Backend                | Installed configuration                                               |
 | -------- | ---------------------- | --------------------------------------------------------------------- |
-| macOS    | Per-user launchd agent | `~/Library/LaunchAgents/native-cron.<id>.plist`                       |
-| Linux    | Per-user systemd units | `~/.config/systemd/user/native-cron-<id>.{service,timer}`             |
-| Windows  | Task Scheduler, S4U    | Task `native-cron-<id>` plus files under `%LOCALAPPDATA%\native-cron` |
+| macOS    | Per-user launchd agent | `~/Library/LaunchAgents/<namespace>.<id>.plist`                       |
+| Linux    | Per-user systemd units | `~/.config/systemd/user/<name>.{service,timer}`                       |
+| Windows  | Task Scheduler, S4U    | Task `<name>` plus files under `%LOCALAPPDATA%\native-cron`           |
+
+`<name>` is `native-cron-<id>` in the default namespace and `<namespace>.<id>` in any other, so jobs in different namespaces can never share a name. On Windows, jobs in a custom namespace keep their files in a `%LOCALAPPDATA%\native-cron\<namespace>` subfolder.
 
 Configuration is generated with dedicated format libraries rather than hand-built strings: [`plist`](https://docs.rs/plist) for launchd, [`systemd-unit-edit`](https://docs.rs/systemd-unit-edit) for systemd units, and [`quick-xml`](https://docs.rs/quick-xml) for Task Scheduler task definitions. On Linux, `XDG_CONFIG_HOME` is respected in place of `~/.config`.
 
@@ -236,6 +292,18 @@ The agent uses `StartCalendarInterval` for calendar schedules and `RunAtLoad` fo
 
 ```sh
 launchctl print gui/$(id -u)/native-cron.backup
+```
+
+On macOS 13 and later, a new launchd agent shows up in System Settings > Login Items and triggers a "Background Items Added" notification. By default these show the name of the executable the job runs. To show your app's name and icon instead, associate the job with your app's bundle identifier:
+
+```rust
+use native_cron::{CronOptions, MacOSOptions};
+
+native_cron::register(
+    CronOptions::new("backup", "0 2 * * *", ["/usr/local/bin/backup"]).macos(MacOSOptions {
+        associated_bundle_identifiers: vec!["com.example.app".to_string()],
+    }),
+)?;
 ```
 
 #### Linux
@@ -257,6 +325,8 @@ loginctl enable-linger "$USER"
 
 The task runs a private PowerShell wrapper script under the registering user with S4U logon. No password is stored, and calendar tasks can run while the user is logged out. S4U tasks cannot access Windows-authenticated network resources such as SMB shares or mapped drives.
 
+With `.windows(WindowsOptions { visible: true })` the task runs in the user's interactive session instead, so the command can show windows, but it only runs while the user is logged on. A visible job whose command is an `.exe` and that sets no `env`, `stdout`, or `stderr` skips the PowerShell wrapper and is started by Task Scheduler directly, so no console window flashes; otherwise the wrapper runs with `-WindowStyle Hidden`.
+
 Task Scheduler permits at most 48 triggers per task. Evenly spaced minute or hour intervals are compressed into a single repetition trigger (`*/15 * * * *` becomes one trigger with `PT15M`), and expressions that would still exceed the limit are rejected with `Error::TooManyWindowsTriggers`.
 
 ```powershell
@@ -268,6 +338,7 @@ schtasks /query /tn "native-cron-backup" /v
 - Lifecycle methods report success only after the underlying native command succeeds.
 - Commands do not overlap. Native behavior applies: launchd coalesces, systemd does not start a second active oneshot service, and Windows tasks use `IgnoreNew`.
 - Missed executions follow the native scheduler: launchd coalesces after wake, systemd timers use `Persistent=true`, and Windows tasks use `StartWhenAvailable`.
+- Runs missed while a job was disabled, or under the schedule it had before an overwrite, are not caught up when it is enabled or re-registered. On Linux this relies on `systemctl clean`, so it needs systemd 243 or later; on older versions the timer may fire once right away instead.
 - Schedules use local wall-clock time and follow the operating system's daylight saving behavior.
 - A `run_at_startup` job runs when registered, when enabled after being disabled, and when the user's scheduler starts a future session.
 

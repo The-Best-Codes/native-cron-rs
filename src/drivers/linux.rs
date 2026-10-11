@@ -3,11 +3,11 @@ use std::str::FromStr;
 
 use systemd_unit_edit::{Section, SystemdUnit};
 
-use crate::driver::Driver;
+use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{systemd_exec_quote, systemd_quote};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
-use crate::normalize::NormalizedJob;
+use crate::normalize::{qualified_name, NormalizedJob, DEFAULT_NAMESPACE};
 use crate::process::{run_checked, CommandRunner};
 use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
@@ -27,6 +27,7 @@ pub struct LinuxContext {
 
 pub struct LinuxDriver {
     context: LinuxContext,
+    namespace: String,
 }
 
 fn list(values: &[u32], wildcard: bool) -> String {
@@ -68,6 +69,25 @@ fn calendar_lines(schedule: &CalendarSchedule) -> Vec<String> {
     } else {
         vec![format!("*-{month}-{day} {time}")]
     }
+}
+
+/// Reads `Key=value` from `systemctl show` output.
+fn show_value<'a>(show: &'a str, key: &str) -> Option<&'a str> {
+    show.lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "n/a")
+}
+
+/// Reads a `--timestamp=unix` value (`@1700000000`) from `systemctl show`
+/// output. Unset timestamps are empty, `n/a`, or `@0`.
+fn show_timestamp(show: &str, key: &str) -> Option<std::time::SystemTime> {
+    show_value(show, key)?
+        .strip_prefix('@')?
+        .parse::<i64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .and_then(unix_seconds)
 }
 
 /// Renders the `.service` unit for `job`.
@@ -141,7 +161,10 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
         }
         section.set_bool("Persistent", true);
         section.set("AccuracySec", "1s");
-        section.set("Unit", &format!("native-cron-{}.service", job.id));
+        section.set(
+            "Unit",
+            &format!("{}.service", qualified_name(&job.namespace, &job.id)),
+        );
     }
 
     unit.add_section("Install");
@@ -154,35 +177,56 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
 }
 
 impl LinuxDriver {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(context: LinuxContext) -> Self {
-        Self { context }
+        Self::with_namespace(context, DEFAULT_NAMESPACE)
+    }
+
+    /// Creates a driver whose native names start with `namespace` instead of
+    /// [`DEFAULT_NAMESPACE`].
+    pub fn with_namespace(context: LinuxContext, namespace: impl Into<String>) -> Self {
+        Self {
+            context,
+            namespace: namespace.into(),
+        }
     }
 
     fn paths(&self, id: &str) -> (PathBuf, PathBuf) {
         let root = self.context.config_root.join("systemd").join("user");
         (
-            root.join(format!("native-cron-{id}.service")),
-            root.join(format!("native-cron-{id}.timer")),
+            root.join(self.service_unit(id)),
+            root.join(self.timer_unit(id)),
         )
     }
 
-    fn timer_unit(id: &str) -> String {
-        format!("native-cron-{id}.timer")
+    fn timer_unit(&self, id: &str) -> String {
+        format!("{}.timer", qualified_name(&self.namespace, id))
     }
 
-    fn service_unit(id: &str) -> String {
-        format!("native-cron-{id}.service")
+    fn service_unit(&self, id: &str) -> String {
+        format!("{}.service", qualified_name(&self.namespace, id))
     }
 
     fn installed_unit(&self, id: &str) -> Option<String> {
         let (service_path, timer_path) = self.paths(id);
         if path_exists(&timer_path) {
-            Some(Self::timer_unit(id))
+            Some(self.timer_unit(id))
         } else if path_exists(&service_path) {
-            Some(Self::service_unit(id))
+            Some(self.service_unit(id))
         } else {
             None
         }
+    }
+
+    /// Forgets when a stopped timer last fired. `Persistent=true` otherwise
+    /// fires the job immediately on start if it "missed" a run while it was
+    /// disabled or under its previous schedule. Best effort: `clean` needs
+    /// systemd 243+, and older versions just keep the old behavior.
+    fn clear_timer_state(&self, unit: &str) {
+        let _ = self
+            .context
+            .runner
+            .run("systemctl", &["--user", "clean", "--what=state", unit]);
     }
 
     fn disable_unit(&self, unit: &str) -> Result<()> {
@@ -228,12 +272,12 @@ impl Driver for LinuxDriver {
                 if path_exists(&timer_path) {
                     std::fs::remove_file(&timer_path)?;
                 }
-                Self::service_unit(&job.id)
+                self.service_unit(&job.id)
             }
             Schedule::Calendar(calendar) => {
                 let timer_contents = render_timer(job, calendar)?;
                 atomic_write(&timer_path, timer_contents.as_bytes())?;
-                Self::timer_unit(&job.id)
+                self.timer_unit(&job.id)
             }
         };
 
@@ -256,6 +300,7 @@ impl Driver for LinuxDriver {
                 )?;
             }
             Schedule::Calendar(_) => {
+                self.clear_timer_state(&unit);
                 run_checked(
                     self.context.runner.as_ref(),
                     "systemctl",
@@ -282,6 +327,7 @@ impl Driver for LinuxDriver {
                 &["--user", "start", "--no-block", &unit],
             )?;
         } else {
+            self.clear_timer_state(&unit);
             run_checked(
                 self.context.runner.as_ref(),
                 "systemctl",
@@ -314,23 +360,117 @@ impl Driver for LinuxDriver {
         Ok(())
     }
 
+    fn run_now(&self, id: &str) -> Result<()> {
+        ensure_runnable(&self.status(id)?)?;
+        // A startup service stays active after it exits (`RemainAfterExit`),
+        // so `start` would be a no-op; restart it instead, unless it's still
+        // running (a oneshot service is `activating` until its command exits),
+        // since a restart would kill that run. A calendar job's service is
+        // only active while it's running, and `start` then leaves that run
+        // alone rather than overlapping it.
+        let (_, timer_path) = self.paths(id);
+        let verb = if path_exists(&timer_path) {
+            "start"
+        } else {
+            let state = run_checked(
+                self.context.runner.as_ref(),
+                "systemctl",
+                &[
+                    "--user",
+                    "show",
+                    "-p",
+                    "ActiveState",
+                    "--value",
+                    &self.service_unit(id),
+                ],
+            )?;
+            if state.stdout.trim() == "activating" {
+                return Ok(());
+            }
+            "restart"
+        };
+        run_checked(
+            self.context.runner.as_ref(),
+            "systemctl",
+            &["--user", verb, "--no-block", &self.service_unit(id)],
+        )?;
+        Ok(())
+    }
+
+    fn run_info(&self, id: &str) -> RunInfo {
+        let show = |unit: &str, properties: &[&str]| {
+            let mut args = vec!["--user", "show", "--timestamp=unix"];
+            for property in properties {
+                args.extend(["-p", property]);
+            }
+            args.push(unit);
+            match self.context.runner.run("systemctl", &args) {
+                Ok(output) if output.code == 0 => output.stdout,
+                _ => String::new(),
+            }
+        };
+
+        let service = show(
+            &self.service_unit(id),
+            &[
+                "ExecMainStartTimestamp",
+                "ExecMainExitTimestamp",
+                "ExecMainStatus",
+            ],
+        );
+        let exited = show_timestamp(&service, "ExecMainExitTimestamp").is_some();
+        let mut info = RunInfo {
+            last_run: show_timestamp(&service, "ExecMainStartTimestamp"),
+            last_exit_code: show_value(&service, "ExecMainStatus")
+                .filter(|_| exited)
+                .and_then(|value| value.parse().ok()),
+            next_run: None,
+        };
+
+        let (_, timer_path) = self.paths(id);
+        if path_exists(&timer_path) {
+            // The timer's last trigger survives the service being unloaded
+            // and reboots (`Persistent=true`), but `run_now` starts the
+            // service without triggering the timer, so take the newer one.
+            let timer = show(
+                &self.timer_unit(id),
+                &["LastTriggerUSec", "NextElapseUSecRealtime"],
+            );
+            info.last_run = info.last_run.max(show_timestamp(&timer, "LastTriggerUSec"));
+            info.next_run = show_timestamp(&timer, "NextElapseUSecRealtime");
+        }
+        info
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let (service_path, timer_path) = self.paths(id);
         let service_exists = path_exists(&service_path);
         let timer_exists = path_exists(&timer_path);
         let unit = if timer_exists {
-            Self::timer_unit(id)
+            self.timer_unit(id)
         } else {
-            Self::service_unit(id)
+            self.service_unit(id)
+        };
+        // A timer is active exactly while it's enabled. A startup service is
+        // only active while its last run succeeded (`RemainAfterExit`), so ask
+        // whether it's enabled instead; a failed run doesn't disable it.
+        let check = if service_exists && !timer_exists {
+            "is-enabled"
+        } else {
+            "is-active"
         };
 
         let result = self
             .context
             .runner
-            .run("systemctl", &["--user", "is-active", "--quiet", &unit])?;
-        if result.code != 0 && result.code != 3 && result.code != 4 {
+            .run("systemctl", &["--user", check, "--quiet", &unit])?;
+        let expected_failure = match check {
+            "is-enabled" => result.code == 1,
+            _ => result.code == 3 || result.code == 4,
+        };
+        if result.code != 0 && !expected_failure {
             return Err(Error::CommandFailed {
-                command: format!("systemctl --user is-active {unit}"),
+                command: format!("systemctl --user {check} {unit}"),
                 detail: result.stderr,
             });
         }
@@ -355,6 +495,9 @@ impl Driver for LinuxDriver {
             env: None,
             stdout: None,
             stderr: None,
+            last_run: None,
+            last_exit_code: None,
+            next_run: None,
         })
     }
 }
@@ -462,6 +605,276 @@ mod tests {
             driver.status("daily-sync").unwrap().state,
             JobState::Missing
         );
+    }
+
+    #[test]
+    fn clears_persistent_timer_state_before_starting_a_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls_clone = calls.clone();
+        let runner = FakeRunner::new(move |command, args| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push(format!("{command} {}", args.join(" ")));
+            crate::test_support::success()
+        });
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+
+        let job = normalize(options("resume", dir.path())).unwrap();
+        driver.register(&job).unwrap();
+        driver.disable("resume").unwrap();
+        driver.enable("resume").unwrap();
+
+        let calls = calls.lock().unwrap();
+        let position = |call: &str| calls.iter().position(|seen| seen == call).unwrap();
+        let clean = "systemctl --user clean --what=state native-cron-resume.timer";
+        assert_eq!(calls.iter().filter(|seen| *seen == clean).count(), 2);
+        assert!(position(clean) < position("systemctl --user restart native-cron-resume.timer"));
+        assert!(
+            calls.iter().rposition(|seen| seen == clean).unwrap()
+                < position("systemctl --user enable --now native-cron-resume.timer")
+        );
+    }
+
+    #[test]
+    fn disabling_an_unregistered_job_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::always_success()),
+        });
+        driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
+    fn run_now_starts_the_service_and_restarts_startup_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runner, calls) =
+            crate::test_support::recording_runner(|_, _| crate::test_support::success());
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+        driver
+            .register(
+                &normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        driver.run_now("daily").unwrap();
+        driver.run_now("login").unwrap();
+        let calls = calls.lock().unwrap();
+        assert!(calls
+            .contains(&"systemctl --user start --no-block native-cron-daily.service".to_string()));
+        assert!(calls.contains(
+            &"systemctl --user restart --no-block native-cron-login.service".to_string()
+        ));
+    }
+
+    #[test]
+    fn startup_jobs_stay_active_and_runnable_after_a_failed_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let enabled_clone = enabled.clone();
+        let (runner, calls) = crate::test_support::recording_runner(move |_, args| {
+            if args.contains(&"is-active") {
+                // The last run failed, so the service isn't active.
+                return crate::test_support::exit_code(3);
+            }
+            if args.contains(&"is-enabled") {
+                let enabled = enabled_clone.load(std::sync::atomic::Ordering::SeqCst);
+                return crate::test_support::exit_code(if enabled { 0 } else { 1 });
+            }
+            crate::test_support::success()
+        });
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+        driver
+            .register(
+                &normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(driver.status("login").unwrap().state, JobState::Active);
+        driver.run_now("login").unwrap();
+        assert!(calls.lock().unwrap().contains(
+            &"systemctl --user restart --no-block native-cron-login.service".to_string()
+        ));
+
+        enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(driver.status("login").unwrap().state, JobState::Inactive);
+        assert!(matches!(driver.run_now("login"), Err(Error::Disabled(_))));
+    }
+
+    #[test]
+    fn run_now_leaves_a_running_startup_job_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runner, calls) = crate::test_support::recording_runner(|_, args| {
+            if args.contains(&"ActiveState") {
+                return crate::process::ProcessOutput {
+                    code: 0,
+                    stdout: "activating\n".to_string(),
+                    stderr: String::new(),
+                };
+            }
+            crate::test_support::success()
+        });
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+        driver
+            .register(
+                &normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        driver.run_now("login").unwrap();
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains("restart")));
+    }
+
+    #[test]
+    fn run_now_rejects_disabled_and_missing_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, args| {
+                if args.contains(&"is-active") {
+                    return crate::test_support::exit_code(3);
+                }
+                crate::test_support::success()
+            })),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+        assert!(matches!(driver.run_now("daily"), Err(Error::Disabled(_))));
+        assert!(matches!(
+            driver.run_now("missing"),
+            Err(Error::NotRegistered(_))
+        ));
+    }
+
+    #[test]
+    fn reports_run_history_from_systemctl_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, args| {
+                let stdout = if args.contains(&"native-cron-daily.timer") {
+                    "LastTriggerUSec=@1700000000\nNextElapseUSecRealtime=@1700086400\n"
+                } else if args.contains(&"native-cron-daily.service") {
+                    "ExecMainStartTimestamp=@1699999999\nExecMainExitTimestamp=@1700000005\nExecMainStatus=2\n"
+                } else {
+                    ""
+                };
+                crate::process::ProcessOutput {
+                    code: 0,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                }
+            })),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+
+        let info = driver.run_info("daily");
+        // The timer's last trigger is newer than the service's last start.
+        assert_eq!(info.last_run, unix_seconds(1_700_000_000));
+        assert_eq!(info.last_exit_code, Some(2));
+        assert_eq!(info.next_run, unix_seconds(1_700_086_400));
+    }
+
+    #[test]
+    fn reports_a_manual_run_newer_than_the_last_timer_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, args| {
+                let stdout = if args.contains(&"native-cron-daily.timer") {
+                    "LastTriggerUSec=@1700000000\n"
+                } else {
+                    "ExecMainStartTimestamp=@1700050000\n"
+                };
+                crate::process::ProcessOutput {
+                    code: 0,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                }
+            })),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+        assert_eq!(
+            driver.run_info("daily").last_run,
+            unix_seconds(1_700_050_000)
+        );
+    }
+
+    #[test]
+    fn leaves_unreported_run_history_empty() {
+        let show = "ExecMainStartTimestamp=\nExecMainExitTimestamp=n/a\nExecMainStatus=0\nLastTriggerUSec=@0\n";
+        assert_eq!(show_timestamp(show, "ExecMainStartTimestamp"), None);
+        assert_eq!(show_timestamp(show, "ExecMainExitTimestamp"), None);
+        assert_eq!(show_timestamp(show, "LastTriggerUSec"), None);
+        assert_eq!(show_value(show, "ExecMainStatus"), Some("0"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, _| crate::test_support::exit_code(1))),
+        });
+        assert_eq!(driver.run_info("daily"), RunInfo::default());
+    }
+
+    #[test]
+    fn namespaces_unit_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = normalize(options("daily", dir.path()).namespace("dev.agent-one")).unwrap();
+        let calendar = match &job.schedule {
+            Schedule::Calendar(calendar) => calendar,
+            _ => panic!("expected calendar schedule"),
+        };
+        assert!(render_timer(&job, calendar)
+            .unwrap()
+            .contains("Unit=dev.agent-one.daily.service"));
+
+        let (runner, calls) =
+            crate::test_support::recording_runner(|_, _| crate::test_support::success());
+        let driver = LinuxDriver::with_namespace(
+            LinuxContext {
+                config_root: dir.path().to_path_buf(),
+                runner: Box::new(runner),
+            },
+            "dev.agent-one",
+        );
+        driver.register(&job).unwrap();
+        let status = driver.status("daily").unwrap();
+        assert!(status.config_paths[0].ends_with("systemd/user/dev.agent-one.daily.service"));
+        assert!(status.config_paths[1].ends_with("systemd/user/dev.agent-one.daily.timer"));
+        assert!(status.config_paths.iter().all(|path| path.exists()));
+        assert!(calls
+            .lock()
+            .unwrap()
+            .contains(&"systemctl --user restart dev.agent-one.daily.timer".to_string()));
     }
 
     #[test]

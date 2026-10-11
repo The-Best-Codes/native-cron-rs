@@ -9,6 +9,10 @@ pub enum Error {
     #[error("cron job id must be 1-100 characters containing only letters, numbers, hyphens, and underscores")]
     InvalidId,
 
+    /// The namespace is empty, too long, or contains disallowed characters.
+    #[error("cron namespace must be 1-100 characters of letters, numbers, dots, hyphens, and underscores, starting and ending with a letter or number")]
+    InvalidNamespace,
+
     /// The cron expression could not be parsed.
     #[error("invalid cron expression: {0}")]
     InvalidCronExpression(String),
@@ -56,9 +60,13 @@ pub enum Error {
     #[error("a cron job with id '{0}' is already registered; pass overwrite: true to replace it")]
     AlreadyExists(String),
 
-    /// `enable` or `disable` was called for an id that is not registered.
+    /// `enable` was called for an id that is not registered.
     #[error("cron job '{0}' is not registered")]
     NotRegistered(String),
+
+    /// `run_now` was called for a job that is registered but disabled.
+    #[error("cron job '{0}' is disabled; enable it before running it")]
+    Disabled(String),
 
     /// The expression expands to more launchd calendar entries than allowed.
     #[error("cron expression expands to {0} launchd intervals; simplify it")]

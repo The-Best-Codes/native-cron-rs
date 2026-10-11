@@ -5,9 +5,51 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::files::resolve_from;
 use crate::schedule::Schedule;
-use crate::types::{CronOptions, WindowsOptions};
+use crate::types::{CronOptions, MacOSOptions, WindowsOptions};
 
 const ID_PATTERN_MAX_LEN: usize = 100;
+
+/// The namespace used when [`CronOptions::namespace`] isn't set.
+pub const DEFAULT_NAMESPACE: &str = "native-cron";
+
+/// Windows device names, which can't be used as a folder name even with an
+/// extension (`com1.app` is as reserved as `COM1`).
+const WINDOWS_RESERVED_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// The native name for a job on Linux and Windows. The default namespace keeps
+/// the `native-cron-<id>` names jobs had before namespaces existed. Other
+/// namespaces are joined with a dot, which ids can't contain, so no two
+/// namespace and id pairs share a name (`a-b` + `c` vs `a` + `b-c`).
+pub fn qualified_name(namespace: &str, id: &str) -> String {
+    if namespace == DEFAULT_NAMESPACE {
+        format!("{namespace}-{id}")
+    } else {
+        format!("{namespace}.{id}")
+    }
+}
+
+/// Validates a namespace: like an id, but dots are allowed (for reverse-DNS
+/// names), and it must start and end with a letter or number. Windows device
+/// names are rejected on every platform so a namespace works everywhere.
+pub fn validate_namespace(namespace: &str) -> Result<()> {
+    let edges_ok = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let first_segment = namespace.split('.').next().unwrap_or_default();
+    let valid = namespace.len() <= ID_PATTERN_MAX_LEN
+        && !WINDOWS_RESERVED_NAMES.contains(&first_segment.to_ascii_lowercase().as_str())
+        && edges_ok(namespace.chars().next())
+        && edges_ok(namespace.chars().last())
+        && namespace
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidNamespace)
+    }
+}
 
 fn validate_id_impl(id: &str) -> Result<()> {
     let valid = !id.is_empty()
@@ -59,6 +101,8 @@ fn validate_env_name(name: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct NormalizedJob {
     pub id: String,
+    /// The validated namespace (see [`CronOptions::namespace`]).
+    pub namespace: String,
     /// The resolved command: the executable is an absolute path.
     pub command: Vec<String>,
     pub schedule: Schedule,
@@ -69,6 +113,8 @@ pub struct NormalizedJob {
     pub overwrite: bool,
     /// Windows-specific options. Ignored by other platforms' drivers.
     pub windows: WindowsOptions,
+    /// macOS-specific options. Ignored by other platforms' drivers.
+    pub macos: MacOSOptions,
 }
 
 /// Validates and resolves [`CronOptions`] into a [`NormalizedJob`].
@@ -79,6 +125,13 @@ pub struct NormalizedJob {
 /// written into native configuration) if the caller supplied one explicitly.
 pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
     validate_id_impl(&options.id)?;
+    let namespace = options
+        .namespace
+        .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+    validate_namespace(&namespace)?;
+    for identifier in &options.macos.associated_bundle_identifiers {
+        validate_text(identifier, "Associated bundle identifier")?;
+    }
 
     let schedule = match (&options.cron, options.run_at_startup) {
         (Some(_), true) => return Err(Error::AmbiguousTrigger),
@@ -131,6 +184,7 @@ pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
 
     Ok(NormalizedJob {
         id: options.id,
+        namespace,
         command,
         schedule,
         cwd: if options.cwd.is_some() {
@@ -143,6 +197,7 @@ pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
         stderr,
         overwrite: options.overwrite,
         windows: options.windows,
+        macos: options.macos,
     })
 }
 
@@ -207,6 +262,39 @@ mod tests {
     }
 
     #[test]
+    fn defaults_and_validates_namespaces() {
+        let job = normalize(valid_options("ns")).unwrap();
+        assert_eq!(job.namespace, DEFAULT_NAMESPACE);
+        let job = normalize(valid_options("ns").namespace("dev.agent-one")).unwrap();
+        assert_eq!(job.namespace, "dev.agent-one");
+        assert!(normalize(valid_options("ns").namespace("com.example.app")).is_ok());
+        assert!(normalize(valid_options("ns").namespace("console")).is_ok());
+        for namespace in [
+            "",
+            ".hidden",
+            "trailing-",
+            "has space",
+            "a/b",
+            &"x".repeat(101),
+            "CON",
+            "nul",
+            "com1.app",
+        ] {
+            assert!(matches!(
+                normalize(valid_options("ns").namespace(namespace)),
+                Err(Error::InvalidNamespace)
+            ));
+        }
+    }
+
+    #[test]
+    fn qualified_names_keep_namespace_and_id_pairs_distinct() {
+        assert_eq!(qualified_name(DEFAULT_NAMESPACE, "b-c"), "native-cron-b-c");
+        assert_eq!(qualified_name("a-b", "c"), "a-b.c");
+        assert_eq!(qualified_name("a", "b-c"), "a.b-c");
+    }
+
+    #[test]
     fn rejects_malformed_schedules() {
         let mut options = valid_options("bad-schedule");
         options.cron = Some("* * *".to_string());
@@ -257,12 +345,15 @@ mod tests {
 
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
+        // The OS may report the current directory differently from the
+        // tempdir path, e.g. through macOS's /var -> /private/var symlink.
+        let expected = std::env::current_dir().unwrap().join("subdir");
         let mut options = valid_options("relative-cwd");
         options.cwd = Some(PathBuf::from("subdir"));
 
         let job = normalize(options).unwrap();
         std::env::set_current_dir(original).unwrap();
 
-        assert_eq!(job.cwd.as_deref(), Some(subdir.as_path()));
+        assert_eq!(job.cwd, Some(expected));
     }
 }

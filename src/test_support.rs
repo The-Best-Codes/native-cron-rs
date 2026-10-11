@@ -49,3 +49,30 @@ pub fn success() -> ProcessOutput {
         stderr: String::new(),
     }
 }
+
+type Calls = std::sync::Arc<Mutex<Vec<String>>>;
+
+/// A runner that records each call as `"command arg1 arg2"` and answers with
+/// `respond`.
+pub fn recording_runner(
+    respond: impl Fn(&str, &[&str]) -> ProcessOutput + Send + Sync + 'static,
+) -> (FakeRunner, Calls) {
+    let calls = Calls::default();
+    let recorded = calls.clone();
+    let runner = FakeRunner::new(move |command, args| {
+        recorded
+            .lock()
+            .unwrap()
+            .push(format!("{command} {}", args.join(" ")));
+        respond(command, args)
+    });
+    (runner, calls)
+}
+
+pub fn exit_code(code: i32) -> ProcessOutput {
+    ProcessOutput {
+        code,
+        stdout: String::new(),
+        stderr: String::new(),
+    }
+}
