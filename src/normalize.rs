@@ -12,11 +12,33 @@ const ID_PATTERN_MAX_LEN: usize = 100;
 /// The namespace used when [`CronOptions::namespace`] isn't set.
 pub const DEFAULT_NAMESPACE: &str = "native-cron";
 
+/// Windows device names, which can't be used as a folder name even with an
+/// extension (`com1.app` is as reserved as `COM1`).
+const WINDOWS_RESERVED_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// The native name for a job on Linux and Windows. The default namespace keeps
+/// the `native-cron-<id>` names jobs had before namespaces existed. Other
+/// namespaces are joined with a dot, which ids can't contain, so no two
+/// namespace and id pairs share a name (`a-b` + `c` vs `a` + `b-c`).
+pub fn qualified_name(namespace: &str, id: &str) -> String {
+    if namespace == DEFAULT_NAMESPACE {
+        format!("{namespace}-{id}")
+    } else {
+        format!("{namespace}.{id}")
+    }
+}
+
 /// Validates a namespace: like an id, but dots are allowed (for reverse-DNS
-/// names), and it must start and end with a letter or number.
+/// names), and it must start and end with a letter or number. Windows device
+/// names are rejected on every platform so a namespace works everywhere.
 pub fn validate_namespace(namespace: &str) -> Result<()> {
     let edges_ok = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let first_segment = namespace.split('.').next().unwrap_or_default();
     let valid = namespace.len() <= ID_PATTERN_MAX_LEN
+        && !WINDOWS_RESERVED_NAMES.contains(&first_segment.to_ascii_lowercase().as_str())
         && edges_ok(namespace.chars().next())
         && edges_ok(namespace.chars().last())
         && namespace
@@ -245,6 +267,8 @@ mod tests {
         assert_eq!(job.namespace, DEFAULT_NAMESPACE);
         let job = normalize(valid_options("ns").namespace("dev.agent-one")).unwrap();
         assert_eq!(job.namespace, "dev.agent-one");
+        assert!(normalize(valid_options("ns").namespace("com.example.app")).is_ok());
+        assert!(normalize(valid_options("ns").namespace("console")).is_ok());
         for namespace in [
             "",
             ".hidden",
@@ -252,12 +276,22 @@ mod tests {
             "has space",
             "a/b",
             &"x".repeat(101),
+            "CON",
+            "nul",
+            "com1.app",
         ] {
             assert!(matches!(
                 normalize(valid_options("ns").namespace(namespace)),
                 Err(Error::InvalidNamespace)
             ));
         }
+    }
+
+    #[test]
+    fn qualified_names_keep_namespace_and_id_pairs_distinct() {
+        assert_eq!(qualified_name(DEFAULT_NAMESPACE, "b-c"), "native-cron-b-c");
+        assert_eq!(qualified_name("a-b", "c"), "a-b.c");
+        assert_eq!(qualified_name("a", "b-c"), "a.b-c");
     }
 
     #[test]

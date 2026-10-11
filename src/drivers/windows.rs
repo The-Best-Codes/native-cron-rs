@@ -9,7 +9,7 @@ use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{powershell_quote, windows_argument};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
-use crate::normalize::{NormalizedJob, DEFAULT_NAMESPACE};
+use crate::normalize::{qualified_name, NormalizedJob, DEFAULT_NAMESPACE};
 use crate::process::{CommandRunner, ProcessOutput};
 use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
@@ -565,7 +565,7 @@ impl WindowsDriver {
     }
 
     fn task_name(&self, id: &str) -> String {
-        format!("{}-{id}", self.namespace)
+        qualified_name(&self.namespace, id)
     }
 
     fn is_startup(&self, id: &str) -> bool {
@@ -1139,7 +1139,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|call| call.starts_with("schtasks.exe /create")
-                && call.contains("/tn dev.agent-one-backup")));
+                && call.contains("/tn dev.agent-one.backup")));
 
         let default = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),

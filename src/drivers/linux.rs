@@ -7,7 +7,7 @@ use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{systemd_exec_quote, systemd_quote};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
-use crate::normalize::{NormalizedJob, DEFAULT_NAMESPACE};
+use crate::normalize::{qualified_name, NormalizedJob, DEFAULT_NAMESPACE};
 use crate::process::{run_checked, CommandRunner};
 use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
@@ -161,7 +161,10 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
         }
         section.set_bool("Persistent", true);
         section.set("AccuracySec", "1s");
-        section.set("Unit", &format!("{}-{}.service", job.namespace, job.id));
+        section.set(
+            "Unit",
+            &format!("{}.service", qualified_name(&job.namespace, &job.id)),
+        );
     }
 
     unit.add_section("Install");
@@ -197,11 +200,11 @@ impl LinuxDriver {
     }
 
     fn timer_unit(&self, id: &str) -> String {
-        format!("{}-{id}.timer", self.namespace)
+        format!("{}.timer", qualified_name(&self.namespace, id))
     }
 
     fn service_unit(&self, id: &str) -> String {
-        format!("{}-{id}.service", self.namespace)
+        format!("{}.service", qualified_name(&self.namespace, id))
     }
 
     fn installed_unit(&self, id: &str) -> Option<String> {
@@ -724,7 +727,7 @@ mod tests {
         };
         assert!(render_timer(&job, calendar)
             .unwrap()
-            .contains("Unit=dev.agent-one-daily.service"));
+            .contains("Unit=dev.agent-one.daily.service"));
 
         let (runner, calls) =
             crate::test_support::recording_runner(|_, _| crate::test_support::success());
@@ -737,13 +740,13 @@ mod tests {
         );
         driver.register(&job).unwrap();
         let status = driver.status("daily").unwrap();
-        assert!(status.config_paths[0].ends_with("systemd/user/dev.agent-one-daily.service"));
-        assert!(status.config_paths[1].ends_with("systemd/user/dev.agent-one-daily.timer"));
+        assert!(status.config_paths[0].ends_with("systemd/user/dev.agent-one.daily.service"));
+        assert!(status.config_paths[1].ends_with("systemd/user/dev.agent-one.daily.timer"));
         assert!(status.config_paths.iter().all(|path| path.exists()));
         assert!(calls
             .lock()
             .unwrap()
-            .contains(&"systemctl --user restart dev.agent-one-daily.timer".to_string()));
+            .contains(&"systemctl --user restart dev.agent-one.daily.timer".to_string()));
     }
 
     #[test]

@@ -133,7 +133,7 @@ let job = native_cron::job_in("com.example.app", "backup")?;
 native_cron::remove_in("com.example.app", "backup")?;
 ```
 
-A namespace is 1 to 100 letters, numbers, dots, hyphens, and underscores, starting and ending with a letter or number. Changing a job's namespace registers a new job; remove the old one with `remove_in` (or `remove` for the default namespace).
+A namespace is 1 to 100 letters, numbers, dots, hyphens, and underscores, starting and ending with a letter or number. Windows device names such as `CON`, `NUL`, or `COM1` (also with a suffix, like `com1.app`) are rejected on every platform. Changing a job's namespace registers a new job; remove the old one with `remove_in` (or `remove` for the default namespace).
 
 Registering an `id` that already exists returns `Error::AlreadyExists` unless `overwrite(true)` is set, in which case the existing schedule and command are replaced and the job is restarted.
 
@@ -279,10 +279,10 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 | Platform | Backend                | Installed configuration                                               |
 | -------- | ---------------------- | --------------------------------------------------------------------- |
 | macOS    | Per-user launchd agent | `~/Library/LaunchAgents/<namespace>.<id>.plist`                       |
-| Linux    | Per-user systemd units | `~/.config/systemd/user/<namespace>-<id>.{service,timer}`             |
-| Windows  | Task Scheduler, S4U    | Task `<namespace>-<id>` plus files under `%LOCALAPPDATA%\native-cron` |
+| Linux    | Per-user systemd units | `~/.config/systemd/user/<name>.{service,timer}`                       |
+| Windows  | Task Scheduler, S4U    | Task `<name>` plus files under `%LOCALAPPDATA%\native-cron`           |
 
-`<namespace>` is `native-cron` unless you set one. On Windows, jobs in a custom namespace keep their files in a `%LOCALAPPDATA%\native-cron\<namespace>` subfolder.
+`<name>` is `native-cron-<id>` in the default namespace and `<namespace>.<id>` in any other, so jobs in different namespaces can never share a name. On Windows, jobs in a custom namespace keep their files in a `%LOCALAPPDATA%\native-cron\<namespace>` subfolder.
 
 Configuration is generated with dedicated format libraries rather than hand-built strings: [`plist`](https://docs.rs/plist) for launchd, [`systemd-unit-edit`](https://docs.rs/systemd-unit-edit) for systemd units, and [`quick-xml`](https://docs.rs/quick-xml) for Task Scheduler task definitions. On Linux, `XDG_CONFIG_HOME` is respected in place of `~/.config`.
 
