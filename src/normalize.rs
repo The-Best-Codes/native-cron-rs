@@ -5,9 +5,29 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::files::resolve_from;
 use crate::schedule::Schedule;
-use crate::types::{CronOptions, WindowsOptions};
+use crate::types::{CronOptions, MacOSOptions, WindowsOptions};
 
 const ID_PATTERN_MAX_LEN: usize = 100;
+
+/// The namespace used when [`CronOptions::namespace`] isn't set.
+pub const DEFAULT_NAMESPACE: &str = "native-cron";
+
+/// Validates a namespace: like an id, but dots are allowed (for reverse-DNS
+/// names), and it must start and end with a letter or number.
+pub fn validate_namespace(namespace: &str) -> Result<()> {
+    let edges_ok = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let valid = namespace.len() <= ID_PATTERN_MAX_LEN
+        && edges_ok(namespace.chars().next())
+        && edges_ok(namespace.chars().last())
+        && namespace
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidNamespace)
+    }
+}
 
 fn validate_id_impl(id: &str) -> Result<()> {
     let valid = !id.is_empty()
@@ -59,6 +79,8 @@ fn validate_env_name(name: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct NormalizedJob {
     pub id: String,
+    /// The validated namespace (see [`CronOptions::namespace`]).
+    pub namespace: String,
     /// The resolved command: the executable is an absolute path.
     pub command: Vec<String>,
     pub schedule: Schedule,
@@ -69,6 +91,8 @@ pub struct NormalizedJob {
     pub overwrite: bool,
     /// Windows-specific options. Ignored by other platforms' drivers.
     pub windows: WindowsOptions,
+    /// macOS-specific options. Ignored by other platforms' drivers.
+    pub macos: MacOSOptions,
 }
 
 /// Validates and resolves [`CronOptions`] into a [`NormalizedJob`].
@@ -79,6 +103,13 @@ pub struct NormalizedJob {
 /// written into native configuration) if the caller supplied one explicitly.
 pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
     validate_id_impl(&options.id)?;
+    let namespace = options
+        .namespace
+        .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+    validate_namespace(&namespace)?;
+    for identifier in &options.macos.associated_bundle_identifiers {
+        validate_text(identifier, "Associated bundle identifier")?;
+    }
 
     let schedule = match (&options.cron, options.run_at_startup) {
         (Some(_), true) => return Err(Error::AmbiguousTrigger),
@@ -131,6 +162,7 @@ pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
 
     Ok(NormalizedJob {
         id: options.id,
+        namespace,
         command,
         schedule,
         cwd: if options.cwd.is_some() {
@@ -143,6 +175,7 @@ pub fn normalize(options: CronOptions) -> Result<NormalizedJob> {
         stderr,
         overwrite: options.overwrite,
         windows: options.windows,
+        macos: options.macos,
     })
 }
 
@@ -204,6 +237,27 @@ mod tests {
         let mut options = valid_options("../bad");
         options.id = "../bad".to_string();
         assert!(matches!(normalize(options), Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn defaults_and_validates_namespaces() {
+        let job = normalize(valid_options("ns")).unwrap();
+        assert_eq!(job.namespace, DEFAULT_NAMESPACE);
+        let job = normalize(valid_options("ns").namespace("dev.agent-one")).unwrap();
+        assert_eq!(job.namespace, "dev.agent-one");
+        for namespace in [
+            "",
+            ".hidden",
+            "trailing-",
+            "has space",
+            "a/b",
+            &"x".repeat(101),
+        ] {
+            assert!(matches!(
+                normalize(valid_options("ns").namespace(namespace)),
+                Err(Error::InvalidNamespace)
+            ));
+        }
     }
 
     #[test]

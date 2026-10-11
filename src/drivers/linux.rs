@@ -7,7 +7,7 @@ use crate::driver::{ensure_runnable, unix_seconds, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::escape::{systemd_exec_quote, systemd_quote};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
-use crate::normalize::NormalizedJob;
+use crate::normalize::{NormalizedJob, DEFAULT_NAMESPACE};
 use crate::process::{run_checked, CommandRunner};
 use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
@@ -27,6 +27,7 @@ pub struct LinuxContext {
 
 pub struct LinuxDriver {
     context: LinuxContext,
+    namespace: String,
 }
 
 fn list(values: &[u32], wildcard: bool) -> String {
@@ -160,7 +161,7 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
         }
         section.set_bool("Persistent", true);
         section.set("AccuracySec", "1s");
-        section.set("Unit", &format!("native-cron-{}.service", job.id));
+        section.set("Unit", &format!("{}-{}.service", job.namespace, job.id));
     }
 
     unit.add_section("Install");
@@ -173,32 +174,42 @@ pub fn render_timer(job: &NormalizedJob, calendar: &CalendarSchedule) -> Result<
 }
 
 impl LinuxDriver {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(context: LinuxContext) -> Self {
-        Self { context }
+        Self::with_namespace(context, DEFAULT_NAMESPACE)
+    }
+
+    /// Creates a driver whose native names start with `namespace` instead of
+    /// [`DEFAULT_NAMESPACE`].
+    pub fn with_namespace(context: LinuxContext, namespace: impl Into<String>) -> Self {
+        Self {
+            context,
+            namespace: namespace.into(),
+        }
     }
 
     fn paths(&self, id: &str) -> (PathBuf, PathBuf) {
         let root = self.context.config_root.join("systemd").join("user");
         (
-            root.join(format!("native-cron-{id}.service")),
-            root.join(format!("native-cron-{id}.timer")),
+            root.join(self.service_unit(id)),
+            root.join(self.timer_unit(id)),
         )
     }
 
-    fn timer_unit(id: &str) -> String {
-        format!("native-cron-{id}.timer")
+    fn timer_unit(&self, id: &str) -> String {
+        format!("{}-{id}.timer", self.namespace)
     }
 
-    fn service_unit(id: &str) -> String {
-        format!("native-cron-{id}.service")
+    fn service_unit(&self, id: &str) -> String {
+        format!("{}-{id}.service", self.namespace)
     }
 
     fn installed_unit(&self, id: &str) -> Option<String> {
         let (service_path, timer_path) = self.paths(id);
         if path_exists(&timer_path) {
-            Some(Self::timer_unit(id))
+            Some(self.timer_unit(id))
         } else if path_exists(&service_path) {
-            Some(Self::service_unit(id))
+            Some(self.service_unit(id))
         } else {
             None
         }
@@ -258,12 +269,12 @@ impl Driver for LinuxDriver {
                 if path_exists(&timer_path) {
                     std::fs::remove_file(&timer_path)?;
                 }
-                Self::service_unit(&job.id)
+                self.service_unit(&job.id)
             }
             Schedule::Calendar(calendar) => {
                 let timer_contents = render_timer(job, calendar)?;
                 atomic_write(&timer_path, timer_contents.as_bytes())?;
-                Self::timer_unit(&job.id)
+                self.timer_unit(&job.id)
             }
         };
 
@@ -361,7 +372,7 @@ impl Driver for LinuxDriver {
         run_checked(
             self.context.runner.as_ref(),
             "systemctl",
-            &["--user", verb, "--no-block", &Self::service_unit(id)],
+            &["--user", verb, "--no-block", &self.service_unit(id)],
         )?;
         Ok(())
     }
@@ -380,7 +391,7 @@ impl Driver for LinuxDriver {
         };
 
         let service = show(
-            &Self::service_unit(id),
+            &self.service_unit(id),
             &[
                 "ExecMainStartTimestamp",
                 "ExecMainExitTimestamp",
@@ -401,7 +412,7 @@ impl Driver for LinuxDriver {
             // The timer's last trigger survives the service being unloaded
             // and reboots (`Persistent=true`), so prefer it.
             let timer = show(
-                &Self::timer_unit(id),
+                &self.timer_unit(id),
                 &["LastTriggerUSec", "NextElapseUSecRealtime"],
             );
             info.last_run = show_timestamp(&timer, "LastTriggerUSec").or(info.last_run);
@@ -415,9 +426,9 @@ impl Driver for LinuxDriver {
         let service_exists = path_exists(&service_path);
         let timer_exists = path_exists(&timer_path);
         let unit = if timer_exists {
-            Self::timer_unit(id)
+            self.timer_unit(id)
         } else {
-            Self::service_unit(id)
+            self.service_unit(id)
         };
 
         let result = self
@@ -701,6 +712,38 @@ mod tests {
             runner: Box::new(FakeRunner::new(|_, _| crate::test_support::exit_code(1))),
         });
         assert_eq!(driver.run_info("daily"), RunInfo::default());
+    }
+
+    #[test]
+    fn namespaces_unit_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = normalize(options("daily", dir.path()).namespace("dev.agent-one")).unwrap();
+        let calendar = match &job.schedule {
+            Schedule::Calendar(calendar) => calendar,
+            _ => panic!("expected calendar schedule"),
+        };
+        assert!(render_timer(&job, calendar)
+            .unwrap()
+            .contains("Unit=dev.agent-one-daily.service"));
+
+        let (runner, calls) =
+            crate::test_support::recording_runner(|_, _| crate::test_support::success());
+        let driver = LinuxDriver::with_namespace(
+            LinuxContext {
+                config_root: dir.path().to_path_buf(),
+                runner: Box::new(runner),
+            },
+            "dev.agent-one",
+        );
+        driver.register(&job).unwrap();
+        let status = driver.status("daily").unwrap();
+        assert!(status.config_paths[0].ends_with("systemd/user/dev.agent-one-daily.service"));
+        assert!(status.config_paths[1].ends_with("systemd/user/dev.agent-one-daily.timer"));
+        assert!(status.config_paths.iter().all(|path| path.exists()));
+        assert!(calls
+            .lock()
+            .unwrap()
+            .contains(&"systemctl --user restart dev.agent-one-daily.timer".to_string()));
     }
 
     #[test]

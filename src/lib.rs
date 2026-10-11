@@ -43,9 +43,10 @@ mod test_support;
 mod types;
 
 pub use error::{Error, Result};
+pub use normalize::DEFAULT_NAMESPACE;
 pub use process::{CommandRunner, ProcessOutput};
 pub use schedule::{CalendarSchedule, CronField, Schedule};
-pub use types::{CronOptions, JobState, JobStatus, Platform, WindowsOptions};
+pub use types::{CronOptions, JobState, JobStatus, MacOSOptions, Platform, WindowsOptions};
 
 use std::sync::Arc;
 
@@ -140,8 +141,8 @@ impl Job {
 /// at registration time (or the explicit `cwd`, if supplied). Output
 /// directories are created automatically.
 pub fn register(options: CronOptions) -> Result<Job> {
-    let driver = runtime::driver()?;
     let normalized = normalize(options)?;
+    let driver = runtime::driver(&normalized.namespace)?;
     driver.register(&normalized)?;
     Ok(Job {
         driver,
@@ -157,9 +158,15 @@ pub fn register(options: CronOptions) -> Result<Job> {
 /// those fields. Use [`register`] with `overwrite: true` if you need to
 /// inspect or change the configuration.
 pub fn job(id: impl Into<String>) -> Result<Job> {
+    job_in(DEFAULT_NAMESPACE, id)
+}
+
+/// Like [`job`], for a job registered with [`CronOptions::namespace`].
+pub fn job_in(namespace: impl AsRef<str>, id: impl Into<String>) -> Result<Job> {
     let id = id.into();
+    normalize::validate_namespace(namespace.as_ref())?;
     normalize::validate_id(&id)?;
-    let driver = runtime::driver()?;
+    let driver = runtime::driver(namespace.as_ref())?;
     Ok(Job {
         driver,
         id,
@@ -169,16 +176,22 @@ pub fn job(id: impl Into<String>) -> Result<Job> {
 
 /// Removes a job by id without needing a [`Job`] handle first. Idempotent.
 pub fn remove(id: impl AsRef<str>) -> Result<()> {
+    remove_in(DEFAULT_NAMESPACE, id)
+}
+
+/// Like [`remove`], for a job registered with [`CronOptions::namespace`].
+pub fn remove_in(namespace: impl AsRef<str>, id: impl AsRef<str>) -> Result<()> {
     let id = id.as_ref();
+    normalize::validate_namespace(namespace.as_ref())?;
     normalize::validate_id(id)?;
-    runtime::driver()?.remove(id)
+    runtime::driver(namespace.as_ref())?.remove(id)
 }
 
 /// Validates that `options` can be registered, without writing any native
 /// configuration or calling any native command. Useful for fast-failing a
 /// batch of registrations before committing to any of them.
 pub fn validate(options: CronOptions) -> Result<()> {
-    let driver = runtime::driver()?;
     let normalized = normalize(options)?;
+    let driver = runtime::driver(&normalized.namespace)?;
     driver.preflight(&normalized)
 }

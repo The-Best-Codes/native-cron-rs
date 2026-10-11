@@ -5,7 +5,7 @@ use plist::{Dictionary, Value};
 use crate::driver::{ensure_runnable, Driver, RunInfo};
 use crate::error::{Error, Result};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
-use crate::normalize::NormalizedJob;
+use crate::normalize::{NormalizedJob, DEFAULT_NAMESPACE};
 use crate::process::{run_checked, CommandRunner};
 use crate::schedule::{CalendarSchedule, Schedule};
 use crate::types::{JobState, JobStatus, Platform};
@@ -19,6 +19,7 @@ pub struct DarwinContext {
 
 pub struct DarwinDriver {
     context: DarwinContext,
+    namespace: String,
 }
 
 #[derive(Clone)]
@@ -149,7 +150,7 @@ fn parse_last_exit_code(print: &str) -> Option<i32> {
 
 /// Renders the launchd agent plist for `job`.
 pub fn render_plist(job: &NormalizedJob) -> Result<Vec<u8>> {
-    let label = format!("native-cron.{}", job.id);
+    let label = format!("{}.{}", job.namespace, job.id);
     let mut root = Dictionary::new();
     root.insert("Label".to_string(), Value::String(label));
 
@@ -164,6 +165,19 @@ pub fn render_plist(job: &NormalizedJob) -> Result<Vec<u8>> {
         root.insert(
             "WorkingDirectory".to_string(),
             Value::String(cwd.to_string_lossy().into_owned()),
+        );
+    }
+
+    if !job.macos.associated_bundle_identifiers.is_empty() {
+        let identifiers = job
+            .macos
+            .associated_bundle_identifiers
+            .iter()
+            .map(|identifier| Value::String(identifier.clone()))
+            .collect();
+        root.insert(
+            "AssociatedBundleIdentifiers".to_string(),
+            Value::Array(identifiers),
         );
     }
 
@@ -214,8 +228,18 @@ pub fn render_plist(job: &NormalizedJob) -> Result<Vec<u8>> {
 }
 
 impl DarwinDriver {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(context: DarwinContext) -> Self {
-        Self { context }
+        Self::with_namespace(context, DEFAULT_NAMESPACE)
+    }
+
+    /// Creates a driver whose native names start with `namespace` instead of
+    /// [`DEFAULT_NAMESPACE`].
+    pub fn with_namespace(context: DarwinContext, namespace: impl Into<String>) -> Self {
+        Self {
+            context,
+            namespace: namespace.into(),
+        }
     }
 
     fn path(&self, id: &str) -> PathBuf {
@@ -223,15 +247,15 @@ impl DarwinDriver {
             .home
             .join("Library")
             .join("LaunchAgents")
-            .join(format!("native-cron.{id}.plist"))
+            .join(format!("{}.plist", self.label(id)))
     }
 
-    fn label(id: &str) -> String {
-        format!("native-cron.{id}")
+    fn label(&self, id: &str) -> String {
+        format!("{}.{id}", self.namespace)
     }
 
     fn service(&self, id: &str) -> String {
-        format!("gui/{}/{}", self.context.uid, Self::label(id))
+        format!("gui/{}/{}", self.context.uid, self.label(id))
     }
 
     fn bootout(&self, id: &str) -> Result<()> {
@@ -520,6 +544,46 @@ mod tests {
             parse_last_exit_code("\tlast exit code = 78: Function not implemented\n"),
             Some(78)
         );
+    }
+
+    #[test]
+    fn namespaces_the_label_and_plist_and_associates_bundle_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = normalize(
+            options("backup", dir.path())
+                .namespace("dev.agent-one")
+                .macos(crate::types::MacOSOptions {
+                    associated_bundle_identifiers: vec!["dev.agent-one".to_string()],
+                }),
+        )
+        .unwrap();
+        let xml = String::from_utf8(render_plist(&job).unwrap()).unwrap();
+        assert!(xml.contains("<string>dev.agent-one.backup</string>"));
+        assert!(xml.contains(
+            "<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>dev.agent-one</string>"
+        ));
+        let plain = normalize(options("backup", dir.path())).unwrap();
+        let xml = String::from_utf8(render_plist(&plain).unwrap()).unwrap();
+        assert!(!xml.contains("AssociatedBundleIdentifiers"));
+
+        let (runner, calls) =
+            crate::test_support::recording_runner(|_, _| crate::test_support::success());
+        let driver = DarwinDriver::with_namespace(
+            DarwinContext {
+                home: dir.path().to_path_buf(),
+                uid: 501,
+                runner: Box::new(runner),
+            },
+            "dev.agent-one",
+        );
+        driver.register(&job).unwrap();
+        let status = driver.status("backup").unwrap();
+        assert!(status.config_paths[0].ends_with("Library/LaunchAgents/dev.agent-one.backup.plist"));
+        assert!(status.config_paths[0].exists());
+        assert!(calls
+            .lock()
+            .unwrap()
+            .contains(&"launchctl print gui/501/dev.agent-one.backup".to_string()));
     }
 
     #[test]

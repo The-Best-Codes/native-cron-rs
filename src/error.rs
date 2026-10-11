@@ -9,6 +9,10 @@ pub enum Error {
     #[error("cron job id must be 1-100 characters containing only letters, numbers, hyphens, and underscores")]
     InvalidId,
 
+    /// The namespace is empty, too long, or contains disallowed characters.
+    #[error("cron namespace must be 1-100 characters of letters, numbers, dots, hyphens, and underscores, starting and ending with a letter or number")]
+    InvalidNamespace,
+
     /// The cron expression could not be parsed.
     #[error("invalid cron expression: {0}")]
     InvalidCronExpression(String),

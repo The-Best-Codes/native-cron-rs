@@ -55,6 +55,18 @@ pub struct WindowsOptions {
     pub visible: bool,
 }
 
+/// macOS-specific options for [`CronOptions`]. Has no effect on other
+/// platforms.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MacOSOptions {
+    /// Bundle identifiers of the apps this job belongs to, written as the
+    /// launchd `AssociatedBundleIdentifiers` key. On macOS 13 and later,
+    /// System Settings > Login Items and the "Background Items Added"
+    /// notification then show the job under that app's name and icon,
+    /// instead of the name of the executable it runs.
+    pub associated_bundle_identifiers: Vec<String>,
+}
+
 /// Options used to register a job with [`crate::register`].
 ///
 /// Only `id` and `command` are required, along with exactly one of `cron` or
@@ -93,6 +105,13 @@ pub struct CronOptions {
     pub overwrite: bool,
     /// Windows-specific options. Has no effect on other platforms.
     pub windows: WindowsOptions,
+    /// macOS-specific options. Has no effect on other platforms.
+    pub macos: MacOSOptions,
+    /// The prefix for this job's native names, so jobs from different apps
+    /// can't collide. Defaults to `native-cron`, giving
+    /// `native-cron.<id>` on macOS and `native-cron-<id>` elsewhere. A
+    /// reverse-DNS name such as `com.example.app` is a good choice.
+    pub namespace: Option<String>,
 }
 
 impl CronOptions {
@@ -183,6 +202,20 @@ impl CronOptions {
     /// Sets Windows-specific options. Has no effect on other platforms.
     pub fn windows(mut self, windows: WindowsOptions) -> Self {
         self.windows = windows;
+        self
+    }
+
+    /// Sets macOS-specific options. Has no effect on other platforms.
+    pub fn macos(mut self, macos: MacOSOptions) -> Self {
+        self.macos = macos;
+        self
+    }
+
+    /// Sets the namespace this job's native names start with. Use the same
+    /// namespace with [`crate::job_in`] and [`crate::remove_in`] to manage
+    /// it later.
+    pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = Some(namespace.into());
         self
     }
 }
