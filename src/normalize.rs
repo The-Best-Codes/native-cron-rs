@@ -311,12 +311,15 @@ mod tests {
 
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
+        // The OS may report the current directory differently from the
+        // tempdir path, e.g. through macOS's /var -> /private/var symlink.
+        let expected = std::env::current_dir().unwrap().join("subdir");
         let mut options = valid_options("relative-cwd");
         options.cwd = Some(PathBuf::from("subdir"));
 
         let job = normalize(options).unwrap();
         std::env::set_current_dir(original).unwrap();
 
-        assert_eq!(job.cwd.as_deref(), Some(subdir.as_path()));
+        assert_eq!(job.cwd, Some(expected));
     }
 }
