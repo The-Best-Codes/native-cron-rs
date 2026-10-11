@@ -433,14 +433,26 @@ impl Driver for LinuxDriver {
         } else {
             self.service_unit(id)
         };
+        // A timer is active exactly while it's enabled. A startup service is
+        // only active while its last run succeeded (`RemainAfterExit`), so ask
+        // whether it's enabled instead; a failed run doesn't disable it.
+        let check = if service_exists && !timer_exists {
+            "is-enabled"
+        } else {
+            "is-active"
+        };
 
         let result = self
             .context
             .runner
-            .run("systemctl", &["--user", "is-active", "--quiet", &unit])?;
-        if result.code != 0 && result.code != 3 && result.code != 4 {
+            .run("systemctl", &["--user", check, "--quiet", &unit])?;
+        let expected_failure = match check {
+            "is-enabled" => result.code == 1,
+            _ => result.code == 3 || result.code == 4,
+        };
+        if result.code != 0 && !expected_failure {
             return Err(Error::CommandFailed {
-                command: format!("systemctl --user is-active {unit}"),
+                command: format!("systemctl --user {check} {unit}"),
                 detail: result.stderr,
             });
         }
@@ -647,6 +659,44 @@ mod tests {
         assert!(calls.contains(
             &"systemctl --user restart --no-block native-cron-login.service".to_string()
         ));
+    }
+
+    #[test]
+    fn startup_jobs_stay_active_and_runnable_after_a_failed_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let enabled_clone = enabled.clone();
+        let (runner, calls) = crate::test_support::recording_runner(move |_, args| {
+            if args.contains(&"is-active") {
+                // The last run failed, so the service isn't active.
+                return crate::test_support::exit_code(3);
+            }
+            if args.contains(&"is-enabled") {
+                let enabled = enabled_clone.load(std::sync::atomic::Ordering::SeqCst);
+                return crate::test_support::exit_code(if enabled { 0 } else { 1 });
+            }
+            crate::test_support::success()
+        });
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+        driver
+            .register(
+                &normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(driver.status("login").unwrap().state, JobState::Active);
+        driver.run_now("login").unwrap();
+        assert!(calls.lock().unwrap().contains(
+            &"systemctl --user restart --no-block native-cron-login.service".to_string()
+        ));
+
+        enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(driver.status("login").unwrap().state, JobState::Inactive);
+        assert!(matches!(driver.run_now("login"), Err(Error::Disabled(_))));
     }
 
     #[test]
