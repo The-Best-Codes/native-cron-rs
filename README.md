@@ -197,7 +197,7 @@ pub struct JobStatus {
 
 | Field            | macOS                       | Linux                                      | Windows                     |
 | ---------------- | --------------------------- | ------------------------------------------ | --------------------------- |
-| `last_run`       | not reported by launchd     | timer's last trigger (or service start)    | `Get-ScheduledTaskInfo`     |
+| `last_run`       | not reported by launchd     | newer of timer trigger and service start   | `Get-ScheduledTaskInfo`     |
 | `last_exit_code` | `launchctl print`           | service's main process exit status         | `Get-ScheduledTaskInfo`     |
 | `next_run`       | not reported by launchd     | timer's next elapse                        | `Get-ScheduledTaskInfo`     |
 
@@ -338,7 +338,7 @@ schtasks /query /tn "native-cron-backup" /v
 - Lifecycle methods report success only after the underlying native command succeeds.
 - Commands do not overlap. Native behavior applies: launchd coalesces, systemd does not start a second active oneshot service, and Windows tasks use `IgnoreNew`.
 - Missed executions follow the native scheduler: launchd coalesces after wake, systemd timers use `Persistent=true`, and Windows tasks use `StartWhenAvailable`.
-- Runs missed while a job was disabled, or under the schedule it had before an overwrite, are not caught up when it is enabled or re-registered.
+- Runs missed while a job was disabled, or under the schedule it had before an overwrite, are not caught up when it is enabled or re-registered. On Linux this relies on `systemctl clean`, so it needs systemd 243 or later; on older versions the timer may fire once right away instead.
 - Schedules use local wall-clock time and follow the operating system's daylight saving behavior.
 - A `run_at_startup` job runs when registered, when enabled after being disabled, and when the user's scheduler starts a future session.
 
