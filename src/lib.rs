@@ -76,7 +76,8 @@ impl Job {
         self.driver.enable(&self.id)
     }
 
-    /// Disables the job while preserving its native configuration.
+    /// Disables the job while preserving its native configuration. Does
+    /// nothing if the job is not registered.
     pub fn disable(&self) -> Result<()> {
         self.driver.disable(&self.id)
     }

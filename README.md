@@ -113,7 +113,7 @@ The `Job` returned by `register` operates on the persistent native job:
 
 ```rust
 job.enable()?; // load and start again
-job.disable()?; // disable/unload, keeping the configuration
+job.disable()?; // disable/unload, keeping the configuration; no-op if not registered
 job.remove()?; // unregister and delete configuration, idempotent
 job.status()?; // report current native state
 ```
@@ -212,7 +212,7 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 | `AmbiguousTrigger`                  | Both `cron` and `run_at_startup` are set.                                                                       |
 | `MissingTrigger`                    | Neither `cron` nor `run_at_startup` is set.                                                                     |
 | `AlreadyExists(String)`             | The id is registered and `overwrite` was not set.                                                               |
-| `NotRegistered(String)`             | `enable` or `disable` was called on an id that is not registered.                                               |
+| `NotRegistered(String)`             | `enable` was called on an id that is not registered.                                                            |
 | `TooManyIntervals(usize)`           | The expression expands to more than 10,000 launchd calendar entries.                                            |
 | `TooManyWindowsTriggers(usize)`     | The expression needs more than 48 Task Scheduler triggers.                                                      |
 | `UnsupportedPlatform`               | The operating system is not macOS, Linux, or Windows.                                                           |

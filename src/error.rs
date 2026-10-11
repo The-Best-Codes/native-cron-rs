@@ -56,7 +56,7 @@ pub enum Error {
     #[error("a cron job with id '{0}' is already registered; pass overwrite: true to replace it")]
     AlreadyExists(String),
 
-    /// `enable` or `disable` was called for an id that is not registered.
+    /// `enable` was called for an id that is not registered.
     #[error("cron job '{0}' is not registered")]
     NotRegistered(String),
 

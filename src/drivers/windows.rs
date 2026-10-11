@@ -894,6 +894,20 @@ mod tests {
     }
 
     #[test]
+    fn disabling_an_unregistered_job_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = WindowsDriver::new(WindowsContext {
+            root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, _| ProcessOutput {
+                code: 0x8007_0002u32 as i32,
+                stdout: String::new(),
+                stderr: "Task not found".to_string(),
+            })),
+        });
+        driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
     fn restores_local_state_when_windows_task_creation_fails() {
         let dir = tempfile::tempdir().unwrap();
         let runner = FakeRunner::new(|command, args| {

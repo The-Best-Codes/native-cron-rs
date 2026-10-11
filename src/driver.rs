@@ -18,7 +18,8 @@ pub trait Driver: Send + Sync {
     /// Enables a previously registered, disabled job.
     fn enable(&self, id: &str) -> Result<()>;
 
-    /// Disables a job while preserving its configuration.
+    /// Disables a job while preserving its configuration. Does nothing if
+    /// the job is not registered.
     fn disable(&self, id: &str) -> Result<()>;
 
     /// Removes a job's configuration entirely. Idempotent.

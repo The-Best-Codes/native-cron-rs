@@ -418,6 +418,26 @@ mod tests {
     }
 
     #[test]
+    fn disabling_an_unregistered_job_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = DarwinDriver::new(DarwinContext {
+            home: dir.path().to_path_buf(),
+            uid: 501,
+            runner: Box::new(FakeRunner::new(|command, args| {
+                if command == "launchctl" && args.first() == Some(&"bootout") {
+                    return crate::process::ProcessOutput {
+                        code: 113,
+                        stdout: String::new(),
+                        stderr: "not found".to_string(),
+                    };
+                }
+                crate::test_support::success()
+            })),
+        });
+        driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
     fn register_without_overwrite_rejects_duplicate_ids() {
         let dir = tempfile::tempdir().unwrap();
         let runner = FakeRunner::always_success();
