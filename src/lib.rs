@@ -87,6 +87,16 @@ impl Job {
         self.driver.remove(&self.id)
     }
 
+    /// Runs the job once right away through the native scheduler, the same
+    /// way a scheduled run would start, without changing its schedule. If a
+    /// run is already in progress, no second one is started.
+    ///
+    /// Returns [`Error::NotRegistered`] if the job is not registered and
+    /// [`Error::Disabled`] if it is disabled.
+    pub fn run_now(&self) -> Result<()> {
+        self.driver.run_now(&self.id)
+    }
+
     /// Reports the job's current native state, enriched with the
     /// configuration this handle was registered with (if any).
     pub fn status(&self) -> Result<JobStatus> {

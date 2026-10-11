@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use plist::{Dictionary, Value};
 
-use crate::driver::Driver;
+use crate::driver::{ensure_runnable, Driver};
 use crate::error::{Error, Result};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
 use crate::normalize::NormalizedJob;
@@ -308,6 +308,17 @@ impl Driver for DarwinDriver {
         Ok(())
     }
 
+    fn run_now(&self, id: &str) -> Result<()> {
+        ensure_runnable(&self.status(id)?)?;
+        let service = self.service(id);
+        run_checked(
+            self.context.runner.as_ref(),
+            "launchctl",
+            &["kickstart", &service],
+        )?;
+        Ok(())
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let path = self.path(id);
         let exists = path_exists(&path);
@@ -435,6 +446,42 @@ mod tests {
             })),
         });
         driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
+    fn run_now_kickstarts_only_loaded_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let loaded_clone = loaded.clone();
+        let (runner, calls) = crate::test_support::recording_runner(move |_, args| {
+            if args.first() == Some(&"print")
+                && !loaded_clone.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return crate::test_support::exit_code(113);
+            }
+            crate::test_support::success()
+        });
+        let driver = DarwinDriver::new(DarwinContext {
+            home: dir.path().to_path_buf(),
+            uid: 501,
+            runner: Box::new(runner),
+        });
+        driver
+            .register(&normalize(options("backup", dir.path())).unwrap())
+            .unwrap();
+
+        driver.run_now("backup").unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .contains(&"launchctl kickstart gui/501/native-cron.backup".to_string()));
+
+        loaded.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(driver.run_now("backup"), Err(Error::Disabled(_))));
+        assert!(matches!(
+            driver.run_now("missing"),
+            Err(Error::NotRegistered(_))
+        ));
     }
 
     #[test]

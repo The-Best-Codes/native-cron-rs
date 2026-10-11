@@ -60,6 +60,10 @@ pub enum Error {
     #[error("cron job '{0}' is not registered")]
     NotRegistered(String),
 
+    /// `run_now` was called for a job that is registered but disabled.
+    #[error("cron job '{0}' is disabled; enable it before running it")]
+    Disabled(String),
+
     /// The expression expands to more launchd calendar entries than allowed.
     #[error("cron expression expands to {0} launchd intervals; simplify it")]
     TooManyIntervals(usize),

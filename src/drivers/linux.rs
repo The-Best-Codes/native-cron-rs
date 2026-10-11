@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use systemd_unit_edit::{Section, SystemdUnit};
 
-use crate::driver::Driver;
+use crate::driver::{ensure_runnable, Driver};
 use crate::error::{Error, Result};
 use crate::escape::{systemd_exec_quote, systemd_quote};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
@@ -327,6 +327,26 @@ impl Driver for LinuxDriver {
         Ok(())
     }
 
+    fn run_now(&self, id: &str) -> Result<()> {
+        ensure_runnable(&self.status(id)?)?;
+        // A startup service stays active after it exits (`RemainAfterExit`),
+        // so `start` would be a no-op; restart it instead. A calendar job's
+        // service is only active while it's running, and `start` then leaves
+        // that run alone rather than overlapping it.
+        let (_, timer_path) = self.paths(id);
+        let verb = if path_exists(&timer_path) {
+            "start"
+        } else {
+            "restart"
+        };
+        run_checked(
+            self.context.runner.as_ref(),
+            "systemctl",
+            &["--user", verb, "--no-block", &Self::service_unit(id)],
+        )?;
+        Ok(())
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let (service_path, timer_path) = self.paths(id);
         let service_exists = path_exists(&service_path);
@@ -518,6 +538,57 @@ mod tests {
             runner: Box::new(FakeRunner::always_success()),
         });
         driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
+    fn run_now_starts_the_service_and_restarts_startup_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runner, calls) =
+            crate::test_support::recording_runner(|_, _| crate::test_support::success());
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+        driver
+            .register(
+                &normalize(CronOptions::at_startup("login", [test_executable()]).cwd(dir.path()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        driver.run_now("daily").unwrap();
+        driver.run_now("login").unwrap();
+        let calls = calls.lock().unwrap();
+        assert!(calls
+            .contains(&"systemctl --user start --no-block native-cron-daily.service".to_string()));
+        assert!(calls.contains(
+            &"systemctl --user restart --no-block native-cron-login.service".to_string()
+        ));
+    }
+
+    #[test]
+    fn run_now_rejects_disabled_and_missing_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxDriver::new(LinuxContext {
+            config_root: dir.path().to_path_buf(),
+            runner: Box::new(FakeRunner::new(|_, args| {
+                if args.contains(&"is-active") {
+                    return crate::test_support::exit_code(3);
+                }
+                crate::test_support::success()
+            })),
+        });
+        driver
+            .register(&normalize(options("daily", dir.path())).unwrap())
+            .unwrap();
+        assert!(matches!(driver.run_now("daily"), Err(Error::Disabled(_))));
+        assert!(matches!(
+            driver.run_now("missing"),
+            Err(Error::NotRegistered(_))
+        ));
     }
 
     #[test]

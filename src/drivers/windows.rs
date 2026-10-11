@@ -5,7 +5,7 @@ use chrono::Local;
 use quick_xml::events::{BytesDecl, BytesText, Event};
 use quick_xml::writer::Writer;
 
-use crate::driver::Driver;
+use crate::driver::{ensure_runnable, Driver};
 use crate::error::{Error, Result};
 use crate::escape::{powershell_quote, windows_argument};
 use crate::files::{atomic_write, ensure_output_directory, path_exists};
@@ -666,6 +666,17 @@ impl Driver for WindowsDriver {
         Ok(())
     }
 
+    fn run_now(&self, id: &str) -> Result<()> {
+        ensure_runnable(&self.status(id)?)?;
+        let task = Self::task_name(id);
+        run_checked_owned(
+            self.context.runner.as_ref(),
+            "schtasks.exe",
+            vec!["/run", "/tn", &task],
+        )?;
+        Ok(())
+    }
+
     fn status(&self, id: &str) -> Result<JobStatus> {
         let (xml_path, script_path) = self.paths(id);
         let result = self.query(id)?;
@@ -959,6 +970,46 @@ mod tests {
             })),
         });
         driver.disable("never-registered").unwrap();
+    }
+
+    #[test]
+    fn run_now_runs_enabled_tasks_and_rejects_disabled_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let enabled_clone = enabled.clone();
+        let (runner, calls) = crate::test_support::recording_runner(move |_, args| {
+            if args.first() == Some(&"/query") && args.contains(&"native-cron-missing") {
+                return crate::test_support::exit_code(0x8007_0002u32 as i32);
+            }
+            if args.first() == Some(&"/query") {
+                return ProcessOutput {
+                    code: 0,
+                    stdout: format!(
+                        "<Task><Settings><Enabled>{}</Enabled></Settings></Task>",
+                        enabled_clone.load(std::sync::atomic::Ordering::SeqCst)
+                    ),
+                    stderr: String::new(),
+                };
+            }
+            crate::test_support::success()
+        });
+        let driver = WindowsDriver::new(WindowsContext {
+            root: dir.path().to_path_buf(),
+            runner: Box::new(runner),
+        });
+
+        driver.run_now("backup").unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .contains(&"schtasks.exe /run /tn native-cron-backup".to_string()));
+
+        enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(driver.run_now("backup"), Err(Error::Disabled(_))));
+        assert!(matches!(
+            driver.run_now("missing"),
+            Err(Error::NotRegistered(_))
+        ));
     }
 
     #[test]

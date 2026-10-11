@@ -1,6 +1,16 @@
+use crate::error::Error;
 use crate::error::Result;
 use crate::normalize::NormalizedJob;
-use crate::types::JobStatus;
+use crate::types::{JobState, JobStatus};
+
+/// Checks that a job can be run on demand: registered and enabled.
+pub fn ensure_runnable(status: &JobStatus) -> Result<()> {
+    match status.state {
+        JobState::Active => Ok(()),
+        JobState::Inactive => Err(Error::Disabled(status.id.clone())),
+        JobState::Missing => Err(Error::NotRegistered(status.id.clone())),
+    }
+}
 
 /// The operations every platform backend (launchd, systemd, Task Scheduler)
 /// must implement.
@@ -24,6 +34,10 @@ pub trait Driver: Send + Sync {
 
     /// Removes a job's configuration entirely. Idempotent.
     fn remove(&self, id: &str) -> Result<()>;
+
+    /// Starts one run of an enabled job right away, through the native
+    /// scheduler, without changing its schedule.
+    fn run_now(&self, id: &str) -> Result<()>;
 
     /// Reports the current native state of a job.
     fn status(&self, id: &str) -> Result<JobStatus>;

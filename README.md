@@ -134,7 +134,10 @@ job.enable()?; // load and start again
 job.disable()?; // disable/unload, keeping the configuration; no-op if not registered
 job.remove()?; // unregister and delete configuration, idempotent
 job.status()?; // report current native state
+job.run_now()?; // start one run right away, without changing the schedule
 ```
+
+`run_now` starts the job through the native scheduler (`launchctl kickstart`, `systemctl --user start`, `schtasks /run`), so it runs with the same environment as a scheduled run. It returns `Error::NotRegistered` for a missing job and `Error::Disabled` for a disabled one, and doesn't start a second run while one is in progress.
 
 A handle to a job registered by another process can be fetched by id with `native_cron::job`, and a job can be removed outright with `native_cron::remove`:
 
@@ -231,6 +234,7 @@ All fallible operations return `Result<T>` with `native_cron::Error`:
 | `MissingTrigger`                    | Neither `cron` nor `run_at_startup` is set.                                                                     |
 | `AlreadyExists(String)`             | The id is registered and `overwrite` was not set.                                                               |
 | `NotRegistered(String)`             | `enable` was called on an id that is not registered.                                                            |
+| `Disabled(String)`                  | `run_now` was called on a job that is registered but disabled.                                                  |
 | `TooManyIntervals(usize)`           | The expression expands to more than 10,000 launchd calendar entries.                                            |
 | `TooManyWindowsTriggers(usize)`     | The expression needs more than 48 Task Scheduler triggers.                                                      |
 | `UnsupportedPlatform`               | The operating system is not macOS, Linux, or Windows.                                                           |
