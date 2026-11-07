@@ -26,13 +26,18 @@ pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, command: &str, args: &[&str]) -> Result<ProcessOutput> {
-        let output = Command::new(command)
-            .args(args)
-            .output()
-            .map_err(|source| Error::Spawn {
-                command: command.to_string(),
-                source,
-            })?;
+        let mut process = Command::new(command);
+        process.args(args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            process.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = process.output().map_err(|source| Error::Spawn {
+            command: command.to_string(),
+            source,
+        })?;
 
         Ok(ProcessOutput {
             code: output.status.code().unwrap_or(1),
