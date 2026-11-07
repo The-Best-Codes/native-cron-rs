@@ -60,7 +60,7 @@ let job = native_cron::register(CronOptions::new(
 
 | Field            | Type                              | Required   | Meaning                                                                                                                           |
 | ---------------- | --------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `id`             | `String`                          | yes        | Unique name, 1 to 100 characters of letters, numbers, hyphens, and underscores. Unique within its namespace on that user account.     |
+| `id`             | `String`                          | yes        | Unique name, 1 to 100 characters of letters, numbers, hyphens, and underscores. Unique within its namespace on that user account. |
 | `command`        | `Vec<String>`                     | yes        | First element is the executable, the rest are its arguments. Must be non-empty.                                                   |
 | `cron`           | `Option<String>`                  | one of two | Five-field expression or nickname. Mutually exclusive with `run_at_startup`.                                                      |
 | `run_at_startup` | `bool`                            | one of two | Run at user-session start instead of on a schedule. Mutually exclusive with `cron`.                                               |
@@ -110,10 +110,10 @@ let job = native_cron::register(CronOptions::open_url(
 ))?;
 ```
 
-| Platform | Command                                                         |
-| -------- | --------------------------------------------------------------- |
-| macOS    | `/usr/bin/open <url>`                                           |
-| Linux    | `systemd-run --user --scope --quiet -- xdg-open <url>`          |
+| Platform | Command                                                           |
+| -------- | ----------------------------------------------------------------- |
+| macOS    | `/usr/bin/open <url>`                                             |
+| Linux    | `systemd-run --user --scope --quiet -- xdg-open <url>`            |
 | Windows  | `rundll32.exe url.dll,FileProtocolHandler <url>`, `visible: true` |
 
 `@reboot` and `@login` are accepted as schedule strings and mean the same thing, but `at_startup` is the preferred spelling.
@@ -195,11 +195,11 @@ pub struct JobStatus {
 
 `last_run`, `last_exit_code`, and `next_run` come from the native scheduler, for any handle, and are `None` when it doesn't report them:
 
-| Field            | macOS                       | Linux                                      | Windows                     |
-| ---------------- | --------------------------- | ------------------------------------------ | --------------------------- |
-| `last_run`       | not reported by launchd     | newer of timer trigger and service start   | `Get-ScheduledTaskInfo`     |
-| `last_exit_code` | `launchctl print`           | service's main process exit status         | `Get-ScheduledTaskInfo`     |
-| `next_run`       | not reported by launchd     | timer's next elapse                        | `Get-ScheduledTaskInfo`     |
+| Field            | macOS                   | Linux                                    | Windows                 |
+| ---------------- | ----------------------- | ---------------------------------------- | ----------------------- |
+| `last_run`       | not reported by launchd | newer of timer trigger and service start | `Get-ScheduledTaskInfo` |
+| `last_exit_code` | `launchctl print`       | service's main process exit status       | `Get-ScheduledTaskInfo` |
+| `next_run`       | not reported by launchd | timer's next elapse                      | `Get-ScheduledTaskInfo` |
 
 ### `validate`
 
@@ -250,37 +250,37 @@ Supported nicknames:
 
 All fallible operations return `Result<T>` with `native_cron::Error`:
 
-| Variant                             | When                                                                                                            |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Variant                             | When                                                                                                                       |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `InvalidNamespace`                  | The namespace is empty, over 100 characters, uses disallowed characters, or doesn't start and end with a letter or number. |
-| `InvalidId`                         | The id is empty, over 100 characters, or uses characters other than letters, numbers, hyphens, and underscores. |
-| `InvalidCronExpression(String)`     | The schedule does not parse. The string says what was wrong.                                                    |
-| `EmptyCommand`                      | The command list is empty.                                                                                      |
-| `InvalidText`                       | An argument, schedule, or environment value is empty or contains a newline or NUL.                              |
-| `InvalidEnvName(String)`            | An environment variable name is not `[A-Za-z_][A-Za-z0-9_]*`.                                                   |
-| `MissingCwd(PathBuf)`               | The working directory does not exist.                                                                           |
-| `MissingExecutable(PathBuf)`        | The executable path does not exist or is not a file.                                                            |
-| `NotExecutable(PathBuf)`            | The executable has no execute bit (Unix).                                                                       |
-| `ExecutableNotFound(String)`        | A bare executable name was not found in `PATH`.                                                                 |
-| `AmbiguousTrigger`                  | Both `cron` and `run_at_startup` are set.                                                                       |
-| `MissingTrigger`                    | Neither `cron` nor `run_at_startup` is set.                                                                     |
-| `AlreadyExists(String)`             | The id is registered and `overwrite` was not set.                                                               |
-| `NotRegistered(String)`             | `enable` was called on an id that is not registered.                                                            |
-| `Disabled(String)`                  | `run_now` was called on a job that is registered but disabled.                                                  |
-| `TooManyIntervals(usize)`           | The expression expands to more than 10,000 launchd calendar entries.                                            |
-| `TooManyWindowsTriggers(usize)`     | The expression needs more than 48 Task Scheduler triggers.                                                      |
-| `UnsupportedPlatform`               | The operating system is not macOS, Linux, or Windows.                                                           |
-| `CommandFailed`                     | A native command (`launchctl`, `systemctl`, `schtasks`) exited non-zero.                                        |
-| `Spawn`                             | A native command could not be started.                                                                          |
-| `Io`, `Plist`, `Xml`, `SystemdUnit` | Filesystem or encoding failures while writing configuration.                                                    |
+| `InvalidId`                         | The id is empty, over 100 characters, or uses characters other than letters, numbers, hyphens, and underscores.            |
+| `InvalidCronExpression(String)`     | The schedule does not parse. The string says what was wrong.                                                               |
+| `EmptyCommand`                      | The command list is empty.                                                                                                 |
+| `InvalidText`                       | An argument, schedule, or environment value is empty or contains a newline or NUL.                                         |
+| `InvalidEnvName(String)`            | An environment variable name is not `[A-Za-z_][A-Za-z0-9_]*`.                                                              |
+| `MissingCwd(PathBuf)`               | The working directory does not exist.                                                                                      |
+| `MissingExecutable(PathBuf)`        | The executable path does not exist or is not a file.                                                                       |
+| `NotExecutable(PathBuf)`            | The executable has no execute bit (Unix).                                                                                  |
+| `ExecutableNotFound(String)`        | A bare executable name was not found in `PATH`.                                                                            |
+| `AmbiguousTrigger`                  | Both `cron` and `run_at_startup` are set.                                                                                  |
+| `MissingTrigger`                    | Neither `cron` nor `run_at_startup` is set.                                                                                |
+| `AlreadyExists(String)`             | The id is registered and `overwrite` was not set.                                                                          |
+| `NotRegistered(String)`             | `enable` was called on an id that is not registered.                                                                       |
+| `Disabled(String)`                  | `run_now` was called on a job that is registered but disabled.                                                             |
+| `TooManyIntervals(usize)`           | The expression expands to more than 10,000 launchd calendar entries.                                                       |
+| `TooManyWindowsTriggers(usize)`     | The expression needs more than 48 Task Scheduler triggers.                                                                 |
+| `UnsupportedPlatform`               | The operating system is not macOS, Linux, or Windows.                                                                      |
+| `CommandFailed`                     | A native command (`launchctl`, `systemctl`, `schtasks`) exited non-zero.                                                   |
+| `Spawn`                             | A native command could not be started.                                                                                     |
+| `Io`, `Plist`, `Xml`, `SystemdUnit` | Filesystem or encoding failures while writing configuration.                                                               |
 
 ### Native backends
 
-| Platform | Backend                | Installed configuration                                               |
-| -------- | ---------------------- | --------------------------------------------------------------------- |
-| macOS    | Per-user launchd agent | `~/Library/LaunchAgents/<namespace>.<id>.plist`                       |
-| Linux    | Per-user systemd units | `~/.config/systemd/user/<name>.{service,timer}`                       |
-| Windows  | Task Scheduler, S4U    | Task `<name>` plus files under `%LOCALAPPDATA%\native-cron`           |
+| Platform | Backend                | Installed configuration                                     |
+| -------- | ---------------------- | ----------------------------------------------------------- |
+| macOS    | Per-user launchd agent | `~/Library/LaunchAgents/<namespace>.<id>.plist`             |
+| Linux    | Per-user systemd units | `~/.config/systemd/user/<name>.{service,timer}`             |
+| Windows  | Task Scheduler, S4U    | Task `<name>` plus files under `%LOCALAPPDATA%\native-cron` |
 
 `<name>` is `native-cron-<id>` in the default namespace and `<namespace>.<id>` in any other, so jobs in different namespaces can never share a name. On Windows, jobs in a custom namespace keep their files in a `%LOCALAPPDATA%\native-cron\<namespace>` subfolder.
 
