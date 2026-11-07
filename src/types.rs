@@ -89,8 +89,8 @@ pub struct CronOptions {
     /// is enabled), instead of on a calendar schedule. Mutually exclusive
     /// with `cron`.
     pub run_at_startup: bool,
-    /// The working directory the command runs from. Defaults to the current
-    /// directory at registration time.
+    /// The working directory the command runs from. Defaults to the native
+    /// scheduler's default.
     pub cwd: Option<PathBuf>,
     /// Extra environment variables to set for the command. Only variables
     /// supplied here are added explicitly; the command otherwise receives the

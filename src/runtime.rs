@@ -58,6 +58,15 @@ fn build_driver(namespace: &str) -> Result<Box<dyn Driver>> {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_logon_user() -> Option<String> {
+    let user = env::var("USERNAME").ok().filter(|user| !user.is_empty())?;
+    Some(match env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+        _ => user,
+    })
+}
+
+#[cfg(target_os = "windows")]
 fn build_driver(namespace: &str) -> Result<Box<dyn Driver>> {
     let root = match env::var_os("LOCALAPPDATA") {
         Some(value) if PathBuf::from(&value).is_absolute() => PathBuf::from(value),
@@ -69,6 +78,7 @@ fn build_driver(namespace: &str) -> Result<Box<dyn Driver>> {
         WindowsContext {
             root,
             runner: Box::new(SystemCommandRunner),
+            logon_user: windows_logon_user(),
         },
         namespace,
     )))

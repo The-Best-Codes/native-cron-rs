@@ -43,6 +43,8 @@ const WEEKDAYS: [&str; 7] = [
 pub struct WindowsContext {
     pub root: PathBuf,
     pub runner: Box<dyn CommandRunner>,
+    /// `DOMAIN\user` that startup jobs' logon triggers are scoped to.
+    pub logon_user: Option<String>,
 }
 
 pub struct WindowsDriver {
@@ -95,7 +97,7 @@ fn start_boundary(hour: u32, minute: u32) -> String {
 /// would show up in the user's session, and there is nothing (env vars or
 /// output redirection) that needs the wrapper anyway. The command also has to
 /// be an `.exe`; anything else (`.ps1`, `.bat`, a file opened through its
-/// association) still needs PowerShell's `&` to start it.
+/// association) still needs the wrapper to start it.
 fn runs_directly(job: &NormalizedJob) -> bool {
     let is_exe = std::path::Path::new(&job.command[0])
         .extension()
@@ -144,39 +146,87 @@ fn parse_task_info(output: &str) -> RunInfo {
 }
 
 /// Renders the PowerShell wrapper script that Task Scheduler invokes.
+///
+/// The command is started with `System.Diagnostics.Process`, not `&`: in
+/// Windows PowerShell 5.1, `&` mangles arguments containing quotes, re-encodes
+/// redirected output as UTF-16, and aborts on the first line of stderr.
 pub fn render_powershell_wrapper(job: &NormalizedJob) -> String {
+    let executable = &job.command[0];
+    let extension = std::path::Path::new(executable)
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let (file_name, arguments) = if extension == "ps1" {
+        let mut arguments = vec![
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ];
+        arguments.extend(job.command.iter().map(String::as_str));
+        ("\"$PSHOME\\powershell.exe\"".to_string(), arguments)
+    } else {
+        let arguments = job.command[1..].iter().map(String::as_str).collect();
+        (powershell_quote(executable), arguments)
+    };
+    let arguments = arguments
+        .iter()
+        .map(|arg| windows_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let logs: Vec<_> = [("Output", &job.stdout), ("Error", &job.stderr)]
+        .into_iter()
+        .filter_map(|(stream, path)| Some((stream, path.as_ref()?)))
+        .collect();
+    // Documents and scripts with a file association can't be started by
+    // CreateProcess, so open them like Explorer does, without waiting.
+    let shell_execute =
+        logs.is_empty() && !["ps1", "exe", "com", "bat", "cmd"].contains(&extension.as_str());
+
     let mut script = String::from("$ErrorActionPreference = 'Stop'\n");
     for (key, value) in &job.env {
         script.push_str(&format!("$env:{key} = {}\n", powershell_quote(value)));
     }
+    script.push_str(&format!(
+        "$start = New-Object System.Diagnostics.ProcessStartInfo\n\
+         $start.FileName = {file_name}\n\
+         $start.Arguments = {}\n\
+         $start.UseShellExecute = ${shell_execute}\n",
+        powershell_quote(&arguments)
+    ));
     if let Some(cwd) = &job.cwd {
         script.push_str(&format!(
-            "Set-Location -LiteralPath {}\n",
+            "$start.WorkingDirectory = {}\n",
             powershell_quote(&cwd.to_string_lossy())
         ));
     }
-    let command = job
-        .command
-        .iter()
-        .map(|arg| powershell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    script.push_str(&format!("& {command}"));
-    if let Some(stdout) = &job.stdout {
+    if shell_execute {
+        script.push_str("[void][System.Diagnostics.Process]::Start($start)\n");
+        return script;
+    }
+    // Append-only handles let stdout and stderr share a file.
+    for (stream, path) in &logs {
         script.push_str(&format!(
-            " 1>> {}",
-            powershell_quote(&stdout.to_string_lossy())
+            "$start.RedirectStandard{stream} = $true\n\
+             $log{stream} = New-Object System.IO.FileStream({}, [System.IO.FileMode]::Append, \
+             [System.Security.AccessControl.FileSystemRights]::AppendData, \
+             [System.IO.FileShare]::ReadWrite, 4096, [System.IO.FileOptions]::None)\n",
+            powershell_quote(&path.to_string_lossy())
         ));
     }
-    if let Some(stderr) = &job.stderr {
+    script.push_str("$process = [System.Diagnostics.Process]::Start($start)\n");
+    for (stream, _) in &logs {
         script.push_str(&format!(
-            " 2>> {}",
-            powershell_quote(&stderr.to_string_lossy())
+            "$copy{stream} = $process.Standard{stream}.BaseStream.CopyToAsync($log{stream})\n"
         ));
     }
-    script.push_str(
-        "\n$nativeCronExitCode = $LASTEXITCODE\nif ($null -eq $nativeCronExitCode) { $nativeCronExitCode = 0 }\nexit $nativeCronExitCode\n",
-    );
+    script.push_str("$process.WaitForExit()\n");
+    for (stream, _) in &logs {
+        script.push_str(&format!("$copy{stream}.Wait()\n$log{stream}.Dispose()\n"));
+    }
+    script.push_str("exit $process.ExitCode\n");
     script
 }
 
@@ -199,6 +249,11 @@ fn render_calendar_trigger(
         writer
             .create_element("Interval")
             .write_text_content(BytesText::new(interval))?;
+        // An indefinite repetition starting earlier today runs the task as
+        // soon as it's registered. Repetitions are only on daily triggers.
+        writer
+            .create_element("Duration")
+            .write_text_content(BytesText::new("P1D"))?;
         writer.write_event(Event::End(quick_xml::events::BytesEnd::new("Repetition")))?;
     }
     schedule_xml(writer)?;
@@ -354,9 +409,10 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
     let hour_step = evenly_spaced(&schedule.hour.values, 24);
     let minute_repetition =
         dates_wildcard && schedule.hour.wildcard && minute_step.is_some_and(|step| 60 % step == 0);
+    // A single time of day needs no repetition.
     let hour_repetition = dates_wildcard
         && schedule.minute.values.len() == 1
-        && hour_step.is_some_and(|step| 24 % step == 0);
+        && hour_step.is_some_and(|step| step < 24 && 24 % step == 0);
 
     if minute_repetition || hour_repetition {
         let interval = if minute_repetition {
@@ -414,7 +470,11 @@ fn render_triggers(writer: &mut Writer<Vec<u8>>, schedule: &CalendarSchedule) ->
 }
 
 /// Renders the Task Scheduler XML task definition for `job`.
-pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String> {
+pub fn render_task_xml(
+    job: &NormalizedJob,
+    script_path: &str,
+    logon_user: Option<&str>,
+) -> Result<String> {
     let (program, arguments) = if runs_directly(job) {
         (job.command[0].as_str(), job.command[1..].to_vec())
     } else {
@@ -467,6 +527,11 @@ pub fn render_task_xml(job: &NormalizedJob, script_path: &str) -> Result<String>
             writer
                 .create_element("Enabled")
                 .write_text_content(BytesText::new("true"))?;
+            if let Some(user) = logon_user {
+                writer
+                    .create_element("UserId")
+                    .write_text_content(BytesText::new(user))?;
+            }
             writer.write_event(Event::End(quick_xml::events::BytesEnd::new("LogonTrigger")))?;
         }
         Schedule::Calendar(calendar) => {
@@ -603,7 +668,11 @@ impl Driver for WindowsDriver {
         if !runs_directly(job) {
             render_powershell_wrapper(job);
         }
-        render_task_xml(job, &script_path.to_string_lossy())?;
+        render_task_xml(
+            job,
+            &script_path.to_string_lossy(),
+            self.context.logon_user.as_deref(),
+        )?;
         Ok(())
     }
 
@@ -629,7 +698,11 @@ impl Driver for WindowsDriver {
                 let script = render_powershell_wrapper(job);
                 atomic_write(&script_path, &utf16le_with_bom(&script))?;
             }
-            let xml = render_task_xml(job, &script_path.to_string_lossy())?;
+            let xml = render_task_xml(
+                job,
+                &script_path.to_string_lossy(),
+                self.context.logon_user.as_deref(),
+            )?;
             atomic_write(&xml_path, &utf16le_with_bom(&xml))?;
 
             let task = self.task_name(&job.id);
@@ -843,24 +916,58 @@ mod tests {
         let job = normalize(options("backup", dir.path())).unwrap();
         let wrapper = render_powershell_wrapper(&job);
         assert!(wrapper.contains("$env:TOKEN = 'it''s secret'"));
-        assert!(wrapper.contains("'it''s safe'"));
+        assert!(wrapper.contains("$start.Arguments = '\"it''s safe\"'"));
+    }
+
+    fn wrapper_for(command: &[&str], stdout: Option<&str>) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job =
+            normalize(CronOptions::new("backup", "0 9 * * *", [test_executable()]).cwd(dir.path()))
+                .unwrap();
+        job.command = command.iter().map(|arg| arg.to_string()).collect();
+        job.stdout = stdout.map(PathBuf::from);
+        render_powershell_wrapper(&job)
+    }
+
+    #[test]
+    fn wrapper_starts_commands_with_exact_arguments_and_raw_output() {
+        let wrapper = wrapper_for(&["C:\\job.exe", "a b", "q\"uote"], Some("C:\\out.log"));
+        assert!(wrapper.contains("$start.Arguments = '\"a b\" \"q\\\"uote\"'"));
+        assert!(wrapper.contains("$start.UseShellExecute = $false"));
+        assert!(wrapper.contains("$logOutput = New-Object System.IO.FileStream('C:\\out.log'"));
+        assert!(wrapper.contains("$process.StandardOutput.BaseStream.CopyToAsync($logOutput)"));
+        assert!(wrapper.ends_with("exit $process.ExitCode\n"));
+
+        let script = wrapper_for(&["C:\\job.ps1"], None);
+        assert!(script.contains("$start.FileName = \"$PSHOME\\powershell.exe\""));
+        assert!(script.contains("-File C:\\job.ps1'"));
+
+        let document = wrapper_for(&["C:\\report.txt"], None);
+        assert!(document.contains("$start.UseShellExecute = $true"));
+        assert!(!document.contains("WaitForExit"));
     }
 
     #[test]
     fn compresses_regular_intervals_into_one_windows_trigger() {
         let dir = tempfile::tempdir().unwrap();
         let job = normalize(options("backup", dir.path())).unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert_eq!(xml.matches("<CalendarTrigger>").count(), 1);
-        assert!(xml.contains("<Interval>PT15M</Interval>"));
+        assert!(xml.contains("<Interval>PT15M</Interval><Duration>P1D</Duration>"));
         assert!(xml.contains("<LogonType>S4U</LogonType>"));
         assert!(!xml.contains("<UserId>"));
 
         let hourly_job =
             normalize(CronOptions::new("backup", "0 * * * *", [test_executable()]).cwd(dir.path()))
                 .unwrap();
-        let hourly = render_task_xml(&hourly_job, "C:\\native-cron\\backup.ps1").unwrap();
+        let hourly = render_task_xml(&hourly_job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(hourly.contains("<Interval>PT60M</Interval>"));
+
+        let daily_job =
+            normalize(CronOptions::new("backup", "0 3 * * *", [test_executable()]).cwd(dir.path()))
+                .unwrap();
+        let daily = render_task_xml(&daily_job, "C:\\native-cron\\backup.ps1", None).unwrap();
+        assert!(!daily.contains("<Repetition>"));
     }
 
     #[test]
@@ -870,7 +977,7 @@ mod tests {
             options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),
         )
         .unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<LogonType>S4U</LogonType>"));
     }
@@ -890,25 +997,25 @@ mod tests {
         .unwrap();
         // Normalization resolves the real test binary; swap in Windows paths.
         job.command[0] = "C:\\Windows\\System32\\rundll32.EXE".to_string();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(xml.contains("<Command>C:\\Windows\\System32\\rundll32.EXE</Command>"));
         assert!(xml.contains("<Arguments>agent-one://cron?v=1&amp;id=x</Arguments>"));
         assert!(!xml.contains("powershell.exe"));
 
         job.command[0] = "C:\\Scripts\\job.ps1".to_string();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(xml.contains("<Command>powershell.exe</Command>"));
 
         let wrapped = normalize(
             options("backup", dir.path()).windows(crate::types::WindowsOptions { visible: true }),
         )
         .unwrap();
-        let xml = render_task_xml(&wrapped, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&wrapped, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(xml.contains("<Command>powershell.exe</Command>"));
         assert!(xml.contains("-WindowStyle Hidden"));
 
         let hidden = normalize(options("backup", dir.path())).unwrap();
-        let xml = render_task_xml(&hidden, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&hidden, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(!xml.contains("-WindowStyle"));
     }
 
@@ -917,10 +1024,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let job = normalize(CronOptions::at_startup("backup", [test_executable()]).cwd(dir.path()))
             .unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert!(xml.contains("<LogonTrigger>"));
         assert!(!xml.contains("<CalendarTrigger>"));
         assert!(!xml.contains("<UserId>"));
+
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", Some("PC\\alice")).unwrap();
+        assert!(xml.contains("<UserId>PC\\alice</UserId></LogonTrigger>"));
     }
 
     #[test]
@@ -930,7 +1040,7 @@ mod tests {
             CronOptions::new("backup", "0 9 15 JAN MON-FRI", [test_executable()]).cwd(dir.path()),
         )
         .unwrap();
-        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap();
+        let xml = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap();
         assert_eq!(xml.matches("<CalendarTrigger>").count(), 2);
         assert!(xml.contains("<ScheduleByMonth>"));
         assert!(xml.contains("<ScheduleByMonthDayOfWeek>"));
@@ -944,7 +1054,7 @@ mod tests {
             CronOptions::new("backup", "*/7 * * * *", [test_executable()]).cwd(dir.path()),
         )
         .unwrap();
-        let error = render_task_xml(&job, "C:\\native-cron\\backup.ps1").unwrap_err();
+        let error = render_task_xml(&job, "C:\\native-cron\\backup.ps1", None).unwrap_err();
         assert!(matches!(error, Error::TooManyWindowsTriggers(_)));
     }
 
@@ -997,6 +1107,7 @@ mod tests {
         let driver = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
             runner: Box::new(runner),
+            logon_user: None,
         });
 
         let job = normalize(options("backup", dir.path())).unwrap();
@@ -1037,6 +1148,7 @@ mod tests {
         let driver = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
             runner: Box::new(runner),
+            logon_user: None,
         });
 
         let job = normalize(
@@ -1060,6 +1172,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Task not found".to_string(),
             })),
+            logon_user: None,
         });
         driver.disable("never-registered").unwrap();
     }
@@ -1088,6 +1201,7 @@ mod tests {
         let driver = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
             runner: Box::new(runner),
+            logon_user: None,
         });
 
         driver.run_now("backup").unwrap();
@@ -1133,6 +1247,7 @@ mod tests {
             WindowsContext {
                 root: dir.path().to_path_buf(),
                 runner: Box::new(runner),
+                logon_user: None,
             },
             "dev.agent-one",
         );
@@ -1159,6 +1274,7 @@ mod tests {
         let default = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
             runner: Box::new(FakeRunner::always_success()),
+            logon_user: None,
         });
         assert_eq!(default.paths("backup").0, dir.path().join("backup.xml"));
     }
@@ -1186,6 +1302,7 @@ mod tests {
         let driver = WindowsDriver::new(WindowsContext {
             root: dir.path().to_path_buf(),
             runner: Box::new(runner),
+            logon_user: None,
         });
 
         let job = normalize(options("backup", dir.path())).unwrap();

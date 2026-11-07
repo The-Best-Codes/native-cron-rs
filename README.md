@@ -325,6 +325,8 @@ loginctl enable-linger "$USER"
 
 The task runs a private PowerShell wrapper script under the registering user with S4U logon. No password is stored, and calendar tasks can run while the user is logged out. S4U tasks cannot access Windows-authenticated network resources such as SMB shares or mapped drives.
 
+`stdout` and `stderr` receive the command's raw output bytes, appended. Files other than `.exe`, `.com`, `.bat`, `.cmd`, and `.ps1` are opened through their file association, without waiting for the app that opens them.
+
 With `.windows(WindowsOptions { visible: true })` the task runs in the user's interactive session instead, so the command can show windows, but it only runs while the user is logged on. A visible job whose command is an `.exe` and that sets no `env`, `stdout`, or `stderr` skips the PowerShell wrapper and is started by Task Scheduler directly, so no console window flashes; otherwise the wrapper runs with `-WindowStyle Hidden`.
 
 native-cron starts its own `schtasks.exe` and `powershell.exe` calls without a console window, so calling it from a GUI app does not flash one.

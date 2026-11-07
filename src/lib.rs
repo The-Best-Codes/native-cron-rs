@@ -106,7 +106,10 @@ impl Job {
             let info = self.driver.run_info(&self.id);
             status.last_run = info.last_run;
             status.last_exit_code = info.last_exit_code;
-            status.next_run = info.next_run;
+            // Task Scheduler reports a next run even for disabled tasks.
+            if status.state == JobState::Active {
+                status.next_run = info.next_run;
+            }
         }
         if let Some(normalized) = &self.normalized {
             status.cron = match &normalized.schedule {
@@ -194,4 +197,37 @@ pub fn validate(options: CronOptions) -> Result<()> {
     let normalized = normalize(options)?;
     let driver = runtime::driver(&normalized.namespace)?;
     driver.preflight(&normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drivers::windows::{WindowsContext, WindowsDriver};
+    use crate::test_support::FakeRunner;
+
+    #[test]
+    fn disabled_jobs_report_no_next_run() {
+        let runner = FakeRunner::new(|command, _| ProcessOutput {
+            code: 0,
+            stdout: if command == "schtasks.exe" {
+                "<Enabled>false</Enabled>".to_string()
+            } else {
+                "NextRunTime=1700086400".to_string()
+            },
+            stderr: String::new(),
+        });
+        let driver = WindowsDriver::new(WindowsContext {
+            root: std::env::temp_dir(),
+            runner: Box::new(runner),
+            logon_user: None,
+        });
+        let job = Job {
+            driver: Arc::new(driver),
+            id: "backup".to_string(),
+            normalized: None,
+        };
+        let status = job.status().unwrap();
+        assert_eq!(status.state, JobState::Inactive);
+        assert_eq!(status.next_run, None);
+    }
 }
