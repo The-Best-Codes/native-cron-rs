@@ -28,9 +28,6 @@ impl CommandRunner for SystemCommandRunner {
     fn run(&self, command: &str, args: &[&str]) -> Result<ProcessOutput> {
         let mut process = Command::new(command);
         process.args(args);
-        // Called from a GUI app, which has no console to share, every
-        // schtasks.exe or powershell.exe call would otherwise flash up a
-        // console window of its own. The output is captured either way.
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
