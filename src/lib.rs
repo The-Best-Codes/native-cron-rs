@@ -190,6 +190,25 @@ pub fn remove_in(namespace: impl AsRef<str>, id: impl AsRef<str>) -> Result<()> 
     runtime::driver(namespace.as_ref())?.remove(id)
 }
 
+/// Sets the folder where the Windows driver keeps each job's task XML and
+/// PowerShell wrapper, instead of the default `%LOCALAPPDATA%\native-cron`.
+/// Jobs in a custom namespace use a `<namespace>` subfolder of it. Has no
+/// effect on other platforms.
+///
+/// Call this before any other `native-cron` function, and pass the same
+/// folder on every run: jobs registered under one folder are not found
+/// under another. A relative path is resolved against the current working
+/// directory.
+///
+/// Apps packaged as MSIX (for example, from the Microsoft Store) need this,
+/// because Windows redirects their writes under `AppData` to a private
+/// folder that Task Scheduler can't see. Pick a folder outside `AppData`,
+/// such as one under `%USERPROFILE%`.
+pub fn set_windows_root(path: impl Into<std::path::PathBuf>) -> Result<()> {
+    runtime::set_windows_root(std::path::absolute(path.into())?);
+    Ok(())
+}
+
 /// Validates that `options` can be registered, without writing any native
 /// configuration or calling any native command. Useful for fast-failing a
 /// batch of registrations before committing to any of them.

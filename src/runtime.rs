@@ -1,6 +1,6 @@
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::driver::Driver;
 use crate::error::{Error, Result};
@@ -12,6 +12,24 @@ use crate::drivers::darwin::{DarwinContext, DarwinDriver};
 use crate::drivers::linux::{LinuxContext, LinuxDriver};
 #[cfg(target_os = "windows")]
 use crate::drivers::windows::{WindowsContext, WindowsDriver};
+
+/// Folder set by [`crate::set_windows_root`], used instead of
+/// `%LOCALAPPDATA%\native-cron` when present.
+static WINDOWS_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+pub(crate) fn set_windows_root(root: PathBuf) {
+    *WINDOWS_ROOT
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = Some(root);
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_root_override() -> Option<PathBuf> {
+    WINDOWS_ROOT
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
 
 fn home_dir() -> Result<PathBuf> {
     #[cfg(windows)]
@@ -68,11 +86,14 @@ fn windows_logon_user() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn build_driver(namespace: &str) -> Result<Box<dyn Driver>> {
-    let root = match env::var_os("LOCALAPPDATA") {
-        Some(value) if PathBuf::from(&value).is_absolute() => PathBuf::from(value),
-        _ => home_dir()?.join("AppData").join("Local"),
-    }
-    .join("native-cron");
+    let root = match windows_root_override() {
+        Some(root) => root,
+        None => match env::var_os("LOCALAPPDATA") {
+            Some(value) if PathBuf::from(&value).is_absolute() => PathBuf::from(value),
+            _ => home_dir()?.join("AppData").join("Local"),
+        }
+        .join("native-cron"),
+    };
 
     Ok(Box::new(WindowsDriver::with_namespace(
         WindowsContext {
@@ -93,4 +114,16 @@ fn build_driver(_namespace: &str) -> Result<Box<dyn Driver>> {
 /// start with `namespace`. Drivers are cheap to build, so this isn't cached.
 pub fn driver(namespace: &str) -> Result<Arc<dyn Driver>> {
     Ok(Arc::from(build_driver(namespace)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stores_the_windows_root_override() {
+        let root = env::temp_dir().join("native-cron-root-test");
+        set_windows_root(root.clone());
+        assert_eq!(windows_root_override(), Some(root));
+    }
 }
